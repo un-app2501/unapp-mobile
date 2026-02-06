@@ -10,6 +10,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   ActivityIndicator,
+  Image,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -265,8 +266,8 @@ export default function App() {
       >
         {/* Header */}
         <View style={styles.header}>
-          <Text style={styles.logo}>un-app</Text>
-          <Text style={styles.tagline}>the laziest way</Text>
+          <Image source={require('./assets/Logo-01.jpg')} style={styles.logoImage} />
+          <Text style={styles.tagline}>YOUR AI</Text>
         </View>
 
         {/* Main Content */}
@@ -342,6 +343,11 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: THEME.lime,
     letterSpacing: -1,
+  },
+  logoImage: {
+    width: 50,
+    height: 50,
+    resizeMode: 'contain',
   },
   tagline: {
     fontSize: 14,
