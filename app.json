@@ -2,7 +2,7 @@
   "expo": {
     "name": "un-app",
     "slug": "unapp",
-    "version": "0.1.0",
+    "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -17,7 +17,19 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "ai.unapp.mobile",
-      "buildNumber": "1"
+      "buildNumber": "1",
+      "infoPlist": {
+        "NSCameraUsageDescription": "un-app does not use your camera",
+        "LSApplicationQueriesSchemes": [
+          "swiggy",
+          "zomato",
+          "googlecalendar",
+          "swiggy",
+          "zomato",
+          "googlecalendar"
+        ],
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -28,8 +40,9 @@
     },
     "extra": {
       "eas": {
-        "projectId": "your-project-id"
+        "projectId": "23f6341c-8e6d-4fe3-b61b-9f753d508143"
       }
-    }
+    },
+    "owner": "swapnil_un-app"
   }
 }
