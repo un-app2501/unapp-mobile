@@ -434,13 +434,40 @@ export default function App() {
       };
     }
     
-    // User is connected - show ready state
+    // Check if user mentioned specific service
+    const queryLower = query.toLowerCase();
+    const wantsSwiggy = queryLower.includes('swiggy');
+    const wantsZomato = queryLower.includes('zomato');
+    
+    // If specific service mentioned, open that one
+    if (wantsSwiggy && isSwiggyConnected) {
+      return {
+        type: 'food',
+        connected: true,
+        source: 'Swiggy',
+        message: 'Open Swiggy to order',
+        deepLink: 'swiggy://',
+      };
+    }
+    
+    if (wantsZomato && isZomatoConnected) {
+      return {
+        type: 'food',
+        connected: true,
+        source: 'Zomato',
+        message: 'Open Zomato to order',
+        deepLink: 'zomato://',
+      };
+    }
+    
+    // Show both options
     return {
       type: 'food',
       connected: true,
-      source: isSwiggyConnected ? 'Swiggy' : 'Zomato',
-      message: `Open ${isSwiggyConnected ? 'Swiggy' : 'Zomato'} to order`,
-      deepLink: isSwiggyConnected ? 'swiggy://' : 'zomato://',
+      showBoth: true,
+      swiggyConnected: isSwiggyConnected,
+      zomatoConnected: isZomatoConnected,
+      message: 'Choose where to order',
     };
     
     // Connected! Show confirmation for now
@@ -662,7 +689,20 @@ export default function App() {
     <Modal visible={showOAuthModal} animationType="slide">
       <SafeAreaView style={styles.oauthContainer}>
         <View style={styles.oauthHeader}>
-          <TouchableOpacity onPress={() => setShowOAuthModal(false)}>
+          <TouchableOpacity onPress={async () => {
+            if (currentOAuthService) {
+              await AsyncStorage.setItem(
+                STORAGE_KEYS[`${currentOAuthService}Token`], 
+                'session_active'
+              );
+              const newConnected = { ...connectedServices, [currentOAuthService]: true };
+              setConnectedServices(newConnected);
+              await AsyncStorage.setItem(STORAGE_KEYS.connectedServices, JSON.stringify(newConnected));
+            }
+            setResponse(null);
+            setShowOAuthModal(false);
+            setCurrentOAuthService(null);
+          }}>
             <Text style={styles.oauthClose}>✕ Done</Text>
           </TouchableOpacity>
           <Text style={styles.oauthTitle}>
@@ -745,6 +785,54 @@ export default function App() {
             </View>
           );
         }
+        if (response.showBoth) {
+          return (
+            <View style={styles.responseCard}>
+              <Text style={styles.responseTitle}>🍕 Food</Text>
+              <Text style={styles.responseMessage}>{response.message}</Text>
+              <View style={styles.connectButtons}>
+                {response.swiggyConnected && (
+                  <TouchableOpacity
+                    style={styles.connectButton}
+                    onPress={() => {
+                      setResponse(null);
+                      setTimeout(() => Linking.openURL('swiggy://'), 100);
+                    }}
+                  >
+                    <Text style={styles.connectButtonText}>Open Swiggy</Text>
+                  </TouchableOpacity>
+                )}
+                {response.zomatoConnected && (
+                  <TouchableOpacity
+                    style={styles.connectButton}
+                    onPress={() => {
+                      setResponse(null);
+                      setTimeout(() => Linking.openURL('zomato://'), 100);
+                    }}
+                  >
+                    <Text style={styles.connectButtonText}>Open Zomato</Text>
+                  </TouchableOpacity>
+                )}
+                {!response.swiggyConnected && (
+                  <TouchableOpacity
+                    style={styles.connectButton}
+                    onPress={() => initiateOAuth('swiggy')}
+                  >
+                    <Text style={styles.connectButtonText}>Connect Swiggy</Text>
+                  </TouchableOpacity>
+                )}
+                {!response.zomatoConnected && (
+                  <TouchableOpacity
+                    style={styles.connectButton}
+                    onPress={() => initiateOAuth('zomato')}
+                  >
+                    <Text style={styles.connectButtonText}>Connect Zomato</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            </View>
+          );
+        }
         return (
           <View style={styles.responseCard}>
             <Text style={styles.responseTitle}>🍕 {response.source}</Text>
@@ -752,9 +840,9 @@ export default function App() {
             <TouchableOpacity
               style={styles.connectButton}
               onPress={() => {
-              setResponse(null);
-              setTimeout(() => Linking.openURL(response.deepLink), 100);
-            }}
+                setResponse(null);
+                setTimeout(() => Linking.openURL(response.deepLink), 100);
+              }}
             >
               <Text style={styles.connectButtonText}>Open {response.source}</Text>
             </TouchableOpacity>
@@ -861,7 +949,7 @@ export default function App() {
         insight = `You check ${key} around ${hourStr}`;
       }
       
-      insights.push({ key, emoji, insight, count: p.count });
+      insights.push({ key, emoji, insight, count: p.count, times: p.times?.length || p.count });
     }
     
     return insights;
@@ -886,6 +974,7 @@ export default function App() {
             <View key={item.key} style={styles.patternRow}>
               <Text style={styles.patternEmoji}>{item.emoji}</Text>
               <Text style={styles.patternInsight}>{item.insight}</Text>
+            <Text style={styles.patternCount}>{item.times}x</Text>
             </View>
           ))
         )}
