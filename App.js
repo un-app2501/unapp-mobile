@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { Animated } from 'react-native';
 import {
   StyleSheet,
   Text,
@@ -188,6 +189,19 @@ export default function App() {
   const [appOpens, setAppOpens] = useState(0);
   
   const scrollViewRef = useRef(null);
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+  
+  // Pulse animation for greeting
+  useEffect(() => {
+    const pulse = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, { toValue: 0.4, duration: 1000, useNativeDriver: true }),
+        Animated.timing(pulseAnim, { toValue: 1, duration: 1000, useNativeDriver: true }),
+      ])
+    );
+    pulse.start();
+    return () => pulse.stop();
+  }, []);
 
   // ============================================
   // LIFECYCLE
@@ -897,7 +911,153 @@ export default function App() {
         );
     }
   };
+// ============================================
+  // AI: PREDICT WHAT USER WANTS
+  // ============================================
+  // ============================================
+  // AI: SMART GREETING
+  // ============================================
+  // ============================================
+  // AI: STREAK CALCULATION
+  // ============================================
+  const getStreak = () => {
+    if (queryHistory.length === 0) return 0;
+    
+    const today = new Date().toDateString();
+    const dates = [...new Set(queryHistory.map(q => 
+      new Date(q.timestamp).toDateString()
+    ))];
+    
+    let streak = 0;
+    let checkDate = new Date();
+    
+    for (let i = 0; i < 30; i++) {
+      const dateStr = checkDate.toDateString();
+      if (dates.includes(dateStr)) {
+        streak++;
+        checkDate.setDate(checkDate.getDate() - 1);
+      } else if (i === 0) {
+        // Today not counted yet, check yesterday
+        checkDate.setDate(checkDate.getDate() - 1);
+      } else {
+        break;
+      }
+    }
+    
+    return streak;
+  };
+  const getGreeting = () => {
+    const hour = new Date().getHours();
+    const stockPattern = patterns.stocks?.count > 2;
+    const foodPattern = patterns.food?.count > 2;
+    
+    if (hour >= 5 && hour < 9) {
+      return stockPattern ? 'Market opens soon' : 'Good morning';
+    } else if (hour >= 9 && hour < 12) {
+      return stockPattern ? 'Market is open' : 'Good morning';
+    } else if (hour >= 12 && hour < 14) {
+      return foodPattern ? 'Lunch time?' : 'Good afternoon';
+    } else if (hour >= 14 && hour < 17) {
+      return 'Good afternoon';
+    } else if (hour >= 17 && hour < 21) {
+      return foodPattern ? 'Dinner time?' : 'Good evening';
+    } else {
+      return 'YOUR AI';
+    }
+  };
+  const getPrediction = () => {
+    const hour = new Date().getHours();
+    const day = new Date().getDay();
+    const isWeekday = day >= 1 && day <= 5;
+    const isMarketHours = hour >= 9 && hour <= 16;
+    const isLunchTime = hour >= 12 && hour <= 14;
+    const isDinnerTime = hour >= 19 && hour <= 21;
+    const isMorning = hour >= 7 && hour <= 10;
+    
+    // Score each category based on patterns + current context
+    const scores = {};
+    
+    // Stocks: high score during market hours if user has pattern
+    if (patterns.stocks && isMarketHours) {
+      const avgHour = patterns.stocks.times?.length > 0 
+        ? patterns.stocks.times.reduce((a, b) => a + b, 0) / patterns.stocks.times.length 
+        : 10;
+      const hourMatch = Math.abs(hour - avgHour) < 2 ? 1.5 : 1;
+      scores.stocks = patterns.stocks.count * hourMatch;
+    }
+    
+    // Food: high score during meal times
+    if (patterns.food && (isLunchTime || isDinnerTime)) {
+      scores.food = patterns.food.count * 1.5;
+    }
+    
+    // Calendar: high score in morning or work hours
+    if (patterns.calendar && (isMorning || isMarketHours)) {
+      scores.calendar = patterns.calendar.count * 1.5;
+    }
+    
+    // Find highest score
+    const topCategory = Object.entries(scores).sort((a, b) => b[1] - a[1])[0];
+    
+    if (!topCategory || topCategory[1] < 1) return null;
+    
+    return topCategory[0];
+  };
 
+  const renderPrediction = () => {
+    const prediction = getPrediction();
+    if (!prediction) return null;
+    
+    const predictions = {
+      stocks: {
+        emoji: '📈',
+        text: 'Check market?',
+        action: () => handlePredictionTap('stocks'),
+      },
+      food: {
+        emoji: '🍕',
+        text: 'Order food?',
+        action: () => handlePredictionTap('food'),
+      },
+      calendar: {
+        emoji: '📅',
+        text: 'Check schedule?',
+        action: () => handlePredictionTap('calendar'),
+      },
+    };
+    
+    const p = predictions[prediction];
+    if (!p) return null;
+    
+    return (
+      <TouchableOpacity style={styles.predictionCard} onPress={p.action}>
+        <Text style={styles.predictionEmoji}>{p.emoji}</Text>
+        <Text style={styles.predictionText}>{p.text}</Text>
+        <Text style={styles.predictionHint}>Tap to go</Text>
+      </TouchableOpacity>
+    );
+  };
+
+  const handlePredictionTap = async (type) => {
+    setLoading(true);
+    let result;
+    
+    switch (type) {
+      case 'stocks':
+        result = await fetchNSEStocks();
+        break;
+      case 'food':
+        result = await handleFoodQuery();
+        break;
+      case 'calendar':
+        result = await handleCalendarQuery();
+        break;
+    }
+    
+    setResponse(result);
+    await updatePatterns(type);
+    setLoading(false);
+  };
   // Analyze patterns into insights
   const analyzePatterns = () => {
     const insights = [];
@@ -988,6 +1148,10 @@ export default function App() {
             <Text style={styles.statLabel}>Queries</Text>
             <Text style={styles.statValue}>{totalQueries}</Text>
           </View>
+          <View style={styles.statItem}>
+            <Text style={styles.statLabel}>Streak</Text>
+            <Text style={styles.statValue}>{getStreak()}🔥</Text>
+          </View>
         </View>
       </View>
     );
@@ -1034,7 +1198,8 @@ export default function App() {
             source={require('./assets/Logo-01.jpg')}
             style={styles.logoImage}
           />
-          <Text style={styles.tagline}>YOUR AI</Text>
+          <Text style={styles.tagline}>YOUR AI - learns you, acts for you</Text>
+          <Animated.Text style={[styles.greeting, { opacity: pulseAnim }]}>{getGreeting()}</Animated.Text>
         </View>
 
         {/* Main Content */}
@@ -1044,6 +1209,9 @@ export default function App() {
           contentContainerStyle={styles.scrollContent}
           keyboardShouldPersistTaps="handled"
         >
+          {/* Smart prediction based on patterns */}
+          {renderPrediction()}
+          
           {/* Pre-loaded suggestion */}
           {preloadedData?.stocks && (
             <TouchableOpacity
@@ -1137,6 +1305,12 @@ const styles = StyleSheet.create({
     color: THEME.lime,
     marginTop: 8,
     letterSpacing: 2,
+  },
+  greeting: {
+    fontSize: 16,
+    color: '#00BFFF',
+    marginTop: 12,
+    fontWeight: '600',
   },
   scrollView: {
     flex: 1,
@@ -1353,7 +1527,29 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: THEME.white,
   },
-  
+  predictionCard: {
+    backgroundColor: THEME.lime,
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  predictionEmoji: {
+    fontSize: 24,
+    marginRight: 12,
+  },
+  predictionText: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: THEME.black,
+    flex: 1,
+  },
+  predictionHint: {
+    fontSize: 12,
+    color: THEME.black,
+    opacity: 0.6,
+  },
   // Pre-load Card
   preloadCard: {
     backgroundColor: THEME.mediumGray,
