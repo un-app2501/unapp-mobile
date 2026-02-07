@@ -19,7 +19,35 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { StatusBar } from 'expo-status-bar';
 import { WebView } from 'react-native-webview';
+// ============================================
+// ANALYTICS (Supabase)
+// ============================================
+const SUPABASE_URL = 'https://gklanhnlzxzfbbawomnd.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdrbGFuaG5senh6ZmJiYXdvbW5kIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzAwOTc0MjgsImV4cCI6MjA4NTY3MzQyOH0.XgB6Riy3iCrcLWTt9Wi2IF0m6a6yH9NjMgjRdf-x8Hk';
 
+const trackEvent = async (eventType, eventData = {}) => {
+  try {
+    const deviceId = await AsyncStorage.getItem('device_id') || `ios_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    await AsyncStorage.setItem('device_id', deviceId);
+    
+    await fetch(`${SUPABASE_URL}/rest/v1/analytics_events`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': SUPABASE_ANON_KEY,
+        'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+      },
+      body: JSON.stringify({
+        session_id: deviceId,
+        event_type: eventType,
+        event_data: eventData,
+        user_agent: 'un-app iOS',
+      }),
+    });
+  } catch (e) {
+    console.log('Analytics error:', e);
+  }
+};
 // Theme
 const THEME = {
   black: '#000000',
@@ -208,6 +236,7 @@ export default function App() {
   // ============================================
   useEffect(() => {
     initializeApp();
+    trackEvent('app_started', { source: 'ios_app' });
   }, []);
 
   const initializeApp = async () => {
@@ -377,6 +406,7 @@ export default function App() {
     
     setLoading(true);
     setResponse(null);
+    trackEvent('query_submitted', { query: query.trim().toLowerCase().substring(0, 50) });
     const queryType = detectQueryType(query);
     
     try {
@@ -624,6 +654,7 @@ export default function App() {
     const newConnected = { ...connectedServices, [currentOAuthService]: true };
     setConnectedServices(newConnected);
     await AsyncStorage.setItem(STORAGE_KEYS.connectedServices, JSON.stringify(newConnected));
+    trackEvent('service_connected', { service: currentOAuthService });
     await AsyncStorage.setItem(STORAGE_KEYS[`${currentOAuthService}Token`], 'session_active');
     
     setShowOAuthModal(false);
