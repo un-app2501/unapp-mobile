@@ -70,6 +70,16 @@ const STORAGE_KEYS = {
   calendarToken: 'unapp_calendar_token',
   connectedServices: 'unapp_connected_services',
   privacyAcknowledged: 'unapp_privacy_ack',
+  nammaYatriToken: 'unapp_nammayatri_token',
+  uberToken: 'unapp_uber_token',
+  olaToken: 'unapp_ola_token',
+  rapidoToken: 'unapp_rapido_token',
+  // v0.2 new keys
+  predictionAccuracy: 'unapp_prediction_accuracy',
+  tapsSaved: 'unapp_taps_saved',
+  lastStockCheck: 'unapp_last_stock_check',
+  weeklyInsight: 'unapp_weekly_insight',
+  lastInsightDate: 'unapp_last_insight_date',
 };
 
 // ============================================
@@ -87,12 +97,16 @@ const MCP_ENDPOINTS = {
 // ============================================
 // NSE STOCKS API (FREE - NO AUTH NEEDED)
 // ============================================
-const fetchNSEStocks = async (symbol = null) => {
+const fetchNSEStocks = async (symbol = null, market = 'india') => {
   try {
-    // Using Yahoo Finance via free API wrapper
-    const symbols = symbol 
-      ? [symbol] 
-      : ['^NSEI', '^BSESN']; // NIFTY 50 and SENSEX
+    let symbols;
+    if (symbol) {
+      symbols = [symbol];
+    } else if (market === 'us') {
+      symbols = ['^IXIC', '^DJI', '^GSPC']; // NASDAQ, DOW, S&P 500
+    } else {
+      symbols = ['^NSEI', '^BSESN']; // NIFTY 50 and SENSEX
+    }
     
     const results = [];
     
@@ -105,19 +119,33 @@ const fetchNSEStocks = async (symbol = null) => {
       if (data.chart && data.chart.result && data.chart.result[0]) {
         const quote = data.chart.result[0];
         const meta = quote.meta;
-        const price = meta.regularMarketPrice;
-        const prevClose = meta.previousClose;
+        const price = meta.regularMarketPrice || meta.previousClose || 0;
+        const prevClose = meta.previousClose || price || 1;
         const change = price - prevClose;
-        const changePercent = (change / prevClose) * 100;
+        const changePercent = prevClose ? (change / prevClose) * 100 : 0;
+        
+        const nameMap = {
+          '^NSEI': 'NIFTY 50', '^BSESN': 'SENSEX',
+          '^IXIC': 'NASDAQ', '^DJI': 'DOW JONES', '^GSPC': 'S&P 500',
+        };
         
         results.push({
-          symbol: sym === '^NSEI' ? 'NIFTY 50' : sym === '^BSESN' ? 'SENSEX' : sym,
+          symbol: nameMap[sym] || sym,
           price: price.toFixed(2),
           change: change.toFixed(2),
           changePercent: changePercent.toFixed(2),
           isUp: change >= 0,
         });
       }
+    }
+    
+    if (results.length === 0) {
+      return {
+        type: 'stocks',
+        data: [],
+        error: 'Markets are being shy right now. Check your connection and try again.',
+        timestamp: new Date().toLocaleTimeString(),
+      };
     }
     
     return {
@@ -129,11 +157,8 @@ const fetchNSEStocks = async (symbol = null) => {
     console.log('Stock fetch error:', error);
     return {
       type: 'stocks',
-      data: [
-        { symbol: 'NIFTY 50', price: '--', change: '--', changePercent: '--', isUp: true },
-        { symbol: 'SENSEX', price: '--', change: '--', changePercent: '--', isUp: true },
-      ],
-      error: 'Market data temporarily unavailable',
+      data: [],
+      error: 'Markets are being shy right now. Check your connection and try again.',
       timestamp: new Date().toLocaleTimeString(),
     };
   }
@@ -215,6 +240,14 @@ export default function App() {
   const [currentOAuthService, setCurrentOAuthService] = useState(null);
   const [preloadedData, setPreloadedData] = useState(null);
   const [appOpens, setAppOpens] = useState(0);
+  const [contextCards, setContextCards] = useState([]);
+  // v0.2 new state
+  const [predictionAccuracy, setPredictionAccuracy] = useState({ correct: 0, total: 0 });
+  const [tapsSaved, setTapsSaved] = useState(0);
+  const [lastStockCheck, setLastStockCheck] = useState(null);
+  const [weeklyInsight, setWeeklyInsight] = useState(null);
+  const [dismissedCategories, setDismissedCategories] = useState(new Set());
+  const currentPredictionRef = useRef(null);
   
   const scrollViewRef = useRef(null);
   const pulseAnim = useRef(new Animated.Value(1)).current;
@@ -244,6 +277,217 @@ export default function App() {
     await checkAndPreloadData();
   };
 
+  // Trigger weekly insight when patterns are ready
+  useEffect(() => {
+    if (Object.keys(patterns).length >= 2) {
+      generateWeeklyInsight();
+    }
+  }, [patterns]);
+
+  // ============================================
+  // CONTEXTUAL CARDS (TIME-BASED, AUTO-SHOW)
+  // ============================================
+  useEffect(() => {
+    generateContextCards();
+  }, [patterns, connectedServices, dismissedCategories]);
+
+  const generateContextCards = () => {
+    const hour = new Date().getHours();
+    const minutes = new Date().getMinutes();
+    const day = new Date().getDay();
+    const isWeekday = day >= 1 && day <= 5;
+    const currentTimeInMinutes = hour * 60 + minutes;
+    const cards = [];
+    const addedCategories = new Set();
+    
+    // Market hours: NSE 9:15am - 3:30pm IST weekdays only
+    const marketOpen = 9 * 60 + 15;  // 9:15
+    const marketClose = 15 * 60 + 30; // 15:30
+    if (isWeekday && currentTimeInMinutes >= marketOpen && currentTimeInMinutes <= marketClose) {
+      cards.push({
+        id: 'market_open',
+        emoji: '📈',
+        title: 'Market is live',
+        subtitle: 'Tap for SENSEX & NIFTY',
+        action: 'check_stocks',
+        category: 'stocks',
+      });
+      addedCategories.add('stocks');
+    }
+    
+    // US Market hours: NASDAQ 9:30am-4pm ET = 8:00pm-1:30am IST (next day)
+    const usMarketOpenIST = 20 * 60;     // 8:00pm IST
+    const usMarketCloseIST = 25 * 60 + 30; // 1:30am IST (next day = 25.5 hrs)
+    const adjustedTime = currentTimeInMinutes < 2 * 60 ? currentTimeInMinutes + 24 * 60 : currentTimeInMinutes;
+    if (isWeekday && adjustedTime >= usMarketOpenIST && adjustedTime <= usMarketCloseIST && !addedCategories.has('stocks')) {
+      cards.push({
+        id: 'us_market_open',
+        emoji: '📈',
+        title: 'US market is live',
+        subtitle: 'Tap for NASDAQ, DOW & S&P',
+        action: 'check_us_stocks',
+        category: 'stocks',
+      });
+      addedCategories.add('stocks');
+    }
+    
+    // Morning commute (7-10 weekdays)
+    if (hour >= 7 && hour <= 10 && isWeekday) {
+      const hasAnyCab = connectedServices.nammaYatri || connectedServices.uber || connectedServices.ola || connectedServices.rapido;
+      cards.push({
+        id: 'morning_cab',
+        emoji: '🚕',
+        title: hasAnyCab ? 'Morning commute' : 'Need a ride?',
+        subtitle: hasAnyCab ? 'Tap to book' : 'Connect a cab service',
+        action: hasAnyCab ? 'open_cab' : 'connect_cab',
+        category: 'cab',
+      });
+      addedCategories.add('cab');
+    }
+    
+    // Lunch (11-14)
+    if (hour >= 11 && hour <= 14) {
+      const hasAnyFood = connectedServices.swiggy || connectedServices.zomato;
+      cards.push({
+        id: 'lunch_time',
+        emoji: '🍕',
+        title: hasAnyFood ? 'Lunch time' : 'Hungry?',
+        subtitle: hasAnyFood ? 'Order now' : 'Connect Swiggy or Zomato',
+        action: hasAnyFood ? 'open_food' : 'connect_food',
+        category: 'food',
+      });
+      addedCategories.add('food');
+    }
+    
+    // Evening commute (17-20 weekdays)
+    if (hour >= 17 && hour <= 20 && isWeekday) {
+      const hasAnyCab = connectedServices.nammaYatri || connectedServices.uber || connectedServices.ola || connectedServices.rapido;
+      cards.push({
+        id: 'evening_cab',
+        emoji: '🚕',
+        title: hasAnyCab ? 'Heading home?' : 'Need a ride?',
+        subtitle: hasAnyCab ? 'Tap to book' : 'Connect a cab service',
+        action: hasAnyCab ? 'open_cab' : 'connect_cab',
+        category: 'cab',
+      });
+      addedCategories.add('cab');
+    }
+    
+    // Dinner (19-22)
+    if (hour >= 19 && hour <= 22) {
+      const hasAnyFood = connectedServices.swiggy || connectedServices.zomato;
+      cards.push({
+        id: 'dinner_time',
+        emoji: '🍕',
+        title: hasAnyFood ? 'Dinner time' : 'Hungry?',
+        subtitle: hasAnyFood ? 'Order now' : 'Connect Swiggy or Zomato',
+        action: hasAnyFood ? 'open_food' : 'connect_food',
+        category: 'food',
+      });
+      addedCategories.add('food');
+    }
+    
+    // Pattern-based cards: if user has a pattern for THIS hour, show card
+    if (patterns) {
+      for (const [category, data] of Object.entries(patterns)) {
+        if (addedCategories.has(category)) continue; // already have a card for this
+        if (!data.times || data.times.length < 2) continue; // need at least 2 data points
+        
+        const hourCounts = {};
+        data.times.forEach(t => { hourCounts[t] = (hourCounts[t] || 0) + 1; });
+        const peakHour = Object.entries(hourCounts).sort((a, b) => b[1] - a[1])[0];
+        
+        if (peakHour && Math.abs(parseInt(peakHour[0]) - hour) <= 1) {
+          // User has a pattern within 1 hour of now
+          const cardConfig = {
+            stocks: { emoji: '📈', title: 'Check market?', action: 'check_stocks' },
+            food: { 
+              emoji: '🍕', 
+              title: connectedServices.swiggy || connectedServices.zomato ? 'Feeling hungry?' : 'Order food?',
+              action: connectedServices.swiggy || connectedServices.zomato ? 'open_food' : 'connect_food',
+            },
+            cab: {
+              emoji: '🚕',
+              title: connectedServices.nammaYatri || connectedServices.uber || connectedServices.ola || connectedServices.rapido ? 'Book a ride?' : 'Need a ride?',
+              action: connectedServices.nammaYatri || connectedServices.uber || connectedServices.ola || connectedServices.rapido ? 'open_cab' : 'connect_cab',
+            },
+            calendar: { emoji: '📅', title: 'Check schedule?', action: 'check_calendar' },
+          };
+          
+          const config = cardConfig[category];
+          if (config) {
+            cards.push({
+              id: `pattern_${category}`,
+              emoji: config.emoji,
+              title: config.title,
+              subtitle: `You usually do this around ${peakHour[0] > 12 ? peakHour[0] - 12 : peakHour[0]}${peakHour[0] >= 12 ? 'pm' : 'am'}`,
+              action: config.action,
+              category: category,
+            });
+            addedCategories.add(category);
+          }
+        }
+      }
+    }
+    
+    setContextCards(cards.filter(c => !dismissedCategories.has(c.category)));
+  };
+
+  const handleContextCardTap = async (card) => {
+    trackEvent('context_card_tap', { card_id: card.id, category: card.category });
+    
+    switch (card.action) {
+      case 'check_stocks':
+        setLoading(true);
+        const stockResult = await fetchNSEStocks();
+        setResponse(stockResult);
+        await updatePatterns('stocks');
+        if (stockResult?.data?.length > 0) await storeLastStockCheck(stockResult);
+        setLoading(false);
+        break;
+      case 'check_us_stocks':
+        setLoading(true);
+        const usStockResult = await fetchNSEStocks(null, 'us');
+        setResponse(usStockResult);
+        await updatePatterns('stocks');
+        if (usStockResult?.data?.length > 0) await storeLastStockCheck(usStockResult);
+        setLoading(false);
+        break;
+      case 'open_food':
+        setQuery('food');
+        const foodResult = await handleFoodQuery();
+        setResponse(foodResult);
+        await updatePatterns('food');
+        setQuery('');
+        break;
+      case 'connect_food':
+        setResponse({ type: 'food', needsConnection: true, message: 'Connect to order food', services: ['swiggy', 'zomato'] });
+        break;
+      case 'open_cab':
+        setQuery('cab');
+        const cabResult = await handleCabQuery();
+        setResponse(cabResult);
+        await updatePatterns('cab');
+        setQuery('');
+        break;
+      case 'connect_cab':
+        setResponse({ type: 'cab', needsConnection: true, message: 'Connect to book a ride', services: ['nammaYatri', 'uber', 'ola', 'rapido'] });
+        break;
+      case 'check_calendar':
+        const calResult = await handleCalendarQuery();
+        setResponse(calResult);
+        await updatePatterns('calendar');
+        break;
+    }
+    
+    // Remove tapped card AND prevent regeneration
+    setDismissedCategories(prev => new Set([...prev, card.category]));
+    setContextCards(prev => prev.filter(c => c.category !== card.category));
+    
+    // Feature 5: Count tap saved
+    await incrementTapsSaved();
+  };
+
   const loadStoredData = async () => {
     try {
       const storedPatterns = await AsyncStorage.getItem(STORAGE_KEYS.patterns);
@@ -253,24 +497,55 @@ export default function App() {
       const privacyAck = await AsyncStorage.getItem(STORAGE_KEYS.privacyAcknowledged);
       
       if (storedPatterns) {
-        const parsed = JSON.parse(storedPatterns);
-        // Clean invalid pattern keys
-        const cleaned = {};
-        for (const key of Object.keys(parsed)) {
-          if (key && key !== '0' && isNaN(key) && parsed[key].count >= 1) {
-            cleaned[key] = parsed[key];
+        try {
+          const parsed = JSON.parse(storedPatterns);
+          // Clean invalid pattern keys + remove general/cricket
+          const validCategories = ['stocks', 'food', 'cab', 'calendar'];
+          const cleaned = {};
+          for (const key of Object.keys(parsed)) {
+            if (validCategories.includes(key) && parsed[key].count >= 1) {
+              cleaned[key] = parsed[key];
+            }
           }
+          setPatterns(cleaned);
+          await AsyncStorage.setItem(STORAGE_KEYS.patterns, JSON.stringify(cleaned));
+        } catch (parseError) {
+          // Corrupted patterns - reset
+          console.log('Pattern data corrupted, resetting');
+          await AsyncStorage.removeItem(STORAGE_KEYS.patterns);
+          setPatterns({});
         }
-        setPatterns(cleaned);
-        await AsyncStorage.setItem(STORAGE_KEYS.patterns, JSON.stringify(cleaned));
       }
-      if (storedHistory) setQueryHistory(JSON.parse(storedHistory));
-      if (storedServices) setConnectedServices(JSON.parse(storedServices));
+      if (storedHistory) {
+        try { setQueryHistory(JSON.parse(storedHistory)); } 
+        catch (e) { await AsyncStorage.removeItem(STORAGE_KEYS.history); }
+      }
+      if (storedServices) {
+        try { setConnectedServices(JSON.parse(storedServices)); }
+        catch (e) { await AsyncStorage.removeItem(STORAGE_KEYS.connectedServices); }
+      }
       
       // Track app opens
       const opens = storedOpens ? parseInt(storedOpens) + 1 : 1;
       setAppOpens(opens);
       await AsyncStorage.setItem(STORAGE_KEYS.opens, opens.toString());
+      
+      // Load v0.2 state
+      try {
+        const storedAccuracy = await AsyncStorage.getItem(STORAGE_KEYS.predictionAccuracy);
+        if (storedAccuracy) setPredictionAccuracy(JSON.parse(storedAccuracy));
+        
+        const storedTaps = await AsyncStorage.getItem(STORAGE_KEYS.tapsSaved);
+        if (storedTaps) setTapsSaved(parseInt(storedTaps));
+        
+        const storedLastStock = await AsyncStorage.getItem(STORAGE_KEYS.lastStockCheck);
+        if (storedLastStock) setLastStockCheck(JSON.parse(storedLastStock));
+        
+        const storedInsight = await AsyncStorage.getItem(STORAGE_KEYS.weeklyInsight);
+        if (storedInsight) setWeeklyInsight(storedInsight);
+      } catch (e) {
+        console.log('v0.2 state load error:', e);
+      }
       
       // Show privacy notice on first open
       if (!privacyAck) {
@@ -280,6 +555,127 @@ export default function App() {
       console.log('App opens:', opens);
     } catch (error) {
       console.log('Error loading stored data:', error);
+    }
+  };
+
+  // ============================================
+  // V0.2 FEATURES
+  // ============================================
+  
+  // Feature 3: Prediction accuracy tracking
+  const trackPredictionResult = async (predicted, actual) => {
+    const isCorrect = predicted === actual;
+    const updated = {
+      correct: predictionAccuracy.correct + (isCorrect ? 1 : 0),
+      total: predictionAccuracy.total + 1,
+    };
+    setPredictionAccuracy(updated);
+    await AsyncStorage.setItem(STORAGE_KEYS.predictionAccuracy, JSON.stringify(updated));
+  };
+  
+  // Feature 5: Taps saved counter
+  const incrementTapsSaved = async () => {
+    const updated = tapsSaved + 1;
+    setTapsSaved(updated);
+    await AsyncStorage.setItem(STORAGE_KEYS.tapsSaved, updated.toString());
+  };
+  
+  // Feature 4: Store last stock check
+  const storeLastStockCheck = async (stockData) => {
+    if (!stockData || !stockData.data || stockData.data.length === 0) return;
+    const checkpoint = {
+      timestamp: Date.now(),
+      timeLabel: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      dateLabel: new Date().toLocaleDateString(),
+      prices: {},
+    };
+    stockData.data.forEach(s => {
+      checkpoint.prices[s.symbol] = parseFloat(s.price);
+    });
+    setLastStockCheck(checkpoint);
+    await AsyncStorage.setItem(STORAGE_KEYS.lastStockCheck, JSON.stringify(checkpoint));
+  };
+  
+  // Feature 4: Calculate "since you last checked" delta
+  const getSinceLastCheck = (currentData) => {
+    if (!lastStockCheck || !currentData || !currentData.data) return null;
+    
+    const hoursSince = (Date.now() - lastStockCheck.timestamp) / (1000 * 60 * 60);
+    if (hoursSince < 0.5) return null; // Don't show if checked less than 30 min ago
+    
+    const deltas = [];
+    currentData.data.forEach(stock => {
+      const prevPrice = lastStockCheck.prices[stock.symbol];
+      if (prevPrice && prevPrice > 0) {
+        const change = ((parseFloat(stock.price) - prevPrice) / prevPrice * 100).toFixed(2);
+        deltas.push({ symbol: stock.symbol, change, isUp: parseFloat(change) >= 0 });
+      }
+    });
+    
+    if (deltas.length === 0) return null;
+    
+    const timeAgo = hoursSince < 1 
+      ? `${Math.round(hoursSince * 60)}min ago`
+      : hoursSince < 24 
+        ? `${Math.round(hoursSince)}hr ago` 
+        : `${Math.round(hoursSince / 24)} day${Math.round(hoursSince / 24) > 1 ? 's' : ''} ago`;
+    
+    return { deltas, timeAgo, timeLabel: lastStockCheck.timeLabel };
+  };
+  
+  // Feature 6: Weekly Claude API behavioral insight
+  const generateWeeklyInsight = async () => {
+    try {
+      const lastDate = await AsyncStorage.getItem(STORAGE_KEYS.lastInsightDate);
+      const now = Date.now();
+      const oneWeek = 7 * 24 * 60 * 60 * 1000;
+      
+      // Only generate once per week (or first time)
+      if (lastDate && (now - parseInt(lastDate)) < oneWeek) return;
+      
+      // Need at least some patterns
+      const patternKeys = Object.keys(patterns).filter(k => patterns[k]?.count >= 2);
+      if (patternKeys.length < 2) return;
+      
+      // Build anonymized pattern summary
+      const patternSummary = {};
+      patternKeys.forEach(k => {
+        patternSummary[k] = {
+          count: patterns[k].count,
+          times: patterns[k].times || [],
+          days: patterns[k].days || [],
+        };
+      });
+      
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': 'REPLACE_WITH_YOUR_KEY',
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 150,
+          messages: [{
+            role: 'user',
+            content: `You are un-app's behavioral AI. Given this user's anonymous app usage patterns from the past week, write ONE short casual behavioral insight (max 2 sentences). Be specific about what you notice. Be witty, not generic. No emojis. Patterns: ${JSON.stringify(patternSummary)}`,
+          }],
+        }),
+      });
+      
+      const data = await response.json();
+      const insight = data.content?.[0]?.text || null;
+      
+      if (insight) {
+        setWeeklyInsight(insight);
+        await AsyncStorage.setItem(STORAGE_KEYS.weeklyInsight, insight);
+        await AsyncStorage.setItem(STORAGE_KEYS.lastInsightDate, now.toString());
+        trackEvent('weekly_insight_generated', { pattern_count: patternKeys.length });
+      }
+    } catch (e) {
+      console.log('Weekly insight generation skipped:', e.message);
+      // Fail silently - insight is a nice-to-have
     }
   };
 
@@ -327,7 +723,9 @@ export default function App() {
     // Stocks
     if (lowered.includes('stock') || lowered.includes('sensex') || 
         lowered.includes('nifty') || lowered.includes('market') ||
-        lowered.includes('share')) {
+        lowered.includes('share') || lowered.includes('nasdaq') ||
+        lowered.includes('dow') || lowered.includes('s&p') ||
+        lowered.includes('us market')) {
       return 'stocks';
     }
     
@@ -351,6 +749,17 @@ export default function App() {
     if (lowered.includes('cricket') || lowered.includes('score') ||
         lowered.includes('ipl') || lowered.includes('match')) {
       return 'cricket';
+    }
+    
+    // Cab
+    if (lowered.includes('cab') || lowered.includes('ride') ||
+        lowered.includes('uber') || lowered.includes('ola') ||
+        lowered.includes('namma') || lowered.includes('yatri') ||
+        lowered.includes('rapido') || lowered.includes('bike') ||
+        lowered.includes('taxi') || lowered.includes('auto') ||
+        lowered.includes('commute') || lowered.includes('office') ||
+        lowered.includes('home') || lowered.includes('drop')) {
+      return 'cab';
     }
     
     return 'general';
@@ -419,7 +828,9 @@ export default function App() {
             result = preloadedData.stocks;
             setPreloadedData(prev => ({ ...prev, stocks: null }));
           } else {
-            result = await fetchNSEStocks();
+            const lowQ = query.toLowerCase();
+            const isUS = lowQ.includes('nasdaq') || lowQ.includes('dow') || lowQ.includes('s&p') || lowQ.includes('us market');
+            result = await fetchNSEStocks(null, isUS ? 'us' : 'india');
           }
           break;
           
@@ -434,26 +845,50 @@ export default function App() {
         case 'cricket':
           result = {
             type: 'cricket',
-            message: 'Cricket integration coming soon! We\'re finding a reliable free API.',
+            message: 'Cricket is on our radar. Hunting for a solid API to bring scores here.',
             status: 'pending',
           };
+          break;
+          
+        case 'cab':
+          result = await handleCabQuery();
           break;
           
         default:
           result = {
             type: 'general',
-            message: 'Try asking about: stocks, food ordering, or your calendar!',
+            message: 'Didn\'t catch that one. Try stocks, food, cab or calendar.',
           };
       }
       
       setResponse(result);
-      await updatePatterns(queryType);
+      
+      // Bug fix 1: Remove contextual cards for this category and prevent regeneration
+      if (result?.type && ['stocks', 'food', 'cab', 'calendar'].includes(result.type)) {
+        setDismissedCategories(prev => new Set([...prev, result.type]));
+        setContextCards(prev => prev.filter(c => c.category !== result.type));
+      }
+      
+      // Bug fix 2: Only track patterns for valid categories
+      if (['stocks', 'food', 'cab', 'calendar'].includes(queryType)) {
+        await updatePatterns(queryType);
+      }
+      
+      // Feature 3: Track prediction accuracy (only for typed queries, not card taps)
+      if (currentPredictionRef.current && ['stocks', 'food', 'cab', 'calendar'].includes(queryType)) {
+        await trackPredictionResult(currentPredictionRef.current, queryType);
+      }
+      
+      // Feature 4: Store stock checkpoint
+      if (queryType === 'stocks' && result?.data?.length > 0) {
+        await storeLastStockCheck(result);
+      }
       
     } catch (error) {
       console.log('Query error:', error);
       setResponse({
         type: 'error',
-        message: 'Something went wrong. Please try again.',
+        message: 'Something broke on our end. Give it another shot.',
       });
     } finally {
       setLoading(false);
@@ -621,6 +1056,79 @@ export default function App() {
   };
 
   // ============================================
+  // DEEP LINK HELPER (TRY APP, FALLBACK TO WEB)
+  // ============================================
+  const openWithFallback = async (deepLink, webUrl) => {
+    try {
+      // Try opening app directly (same as food deep links)
+      await Linking.openURL(deepLink);
+    } catch (e) {
+      // App not installed or scheme not supported, open web
+      try {
+        await Linking.openURL(webUrl);
+      } catch (e2) {
+        console.log('Could not open:', deepLink, webUrl);
+      }
+    }
+  };
+
+  const CAB_WEB_URLS = {
+    'nammayatri://': 'https://nammayatri.in',
+    'uber://': 'https://m.uber.com',
+    'olacabs://': 'https://www.olacabs.com',
+    'rapido://': 'https://www.rapido.bike',
+  };
+
+  // ============================================
+  // CAB QUERY (NAMMA YATRI / UBER / OLA / RAPIDO)
+  // ============================================
+  const handleCabQuery = async () => {
+    const isNammaConnected = connectedServices.nammaYatri;
+    const isUberConnected = connectedServices.uber;
+    const isOlaConnected = connectedServices.ola;
+    const isRapidoConnected = connectedServices.rapido;
+    
+    if (!isNammaConnected && !isUberConnected && !isOlaConnected && !isRapidoConnected) {
+      return {
+        type: 'cab',
+        needsConnection: true,
+        message: 'Connect to book a ride',
+        services: ['nammaYatri', 'uber', 'ola', 'rapido'],
+      };
+    }
+    
+    const queryLower = query.toLowerCase();
+    const wantsNamma = queryLower.includes('namma') || queryLower.includes('yatri');
+    const wantsUber = queryLower.includes('uber');
+    const wantsOla = queryLower.includes('ola');
+    const wantsRapido = queryLower.includes('rapido') || queryLower.includes('bike');
+    
+    if (wantsNamma && isNammaConnected) {
+      return { type: 'cab', connected: true, source: 'Namma Yatri', message: 'Open Namma Yatri', deepLink: 'nammayatri://' };
+    }
+    if (wantsUber && isUberConnected) {
+      return { type: 'cab', connected: true, source: 'Uber', message: 'Open Uber', deepLink: 'uber://' };
+    }
+    if (wantsOla && isOlaConnected) {
+      return { type: 'cab', connected: true, source: 'Ola', message: 'Open Ola', deepLink: 'olacabs://' };
+    }
+    if (wantsRapido && isRapidoConnected) {
+      return { type: 'cab', connected: true, source: 'Rapido', message: 'Open Rapido', deepLink: 'rapido://' };
+    }
+    
+    return {
+      type: 'cab',
+      connected: true,
+      showAll: true,
+      nammaConnected: isNammaConnected,
+      uberConnected: isUberConnected,
+      olaConnected: isOlaConnected,
+      rapidoConnected: isRapidoConnected,
+      message: 'Choose your ride',
+    };
+  };
+
+  // ============================================
   // OAUTH HANDLING
   // ============================================
   const initiateOAuth = async (service) => {
@@ -640,6 +1148,22 @@ export default function App() {
         
       case 'calendar':
         authUrl = 'https://calendar.google.com';
+        break;
+        
+      case 'nammaYatri':
+        authUrl = 'https://nammayatri.in';
+        break;
+        
+      case 'uber':
+        authUrl = 'https://m.uber.com';
+        break;
+        
+      case 'ola':
+        authUrl = 'https://www.olacabs.com';
+        break;
+        
+      case 'rapido':
+        authUrl = 'https://www.rapido.bike';
         break;
     }
     
@@ -779,25 +1303,41 @@ export default function App() {
     
     switch (response.type) {
       case 'stocks':
+        const sinceCheck = getSinceLastCheck(response);
         return (
           <View style={styles.responseCard}>
             <Text style={styles.responseTitle}>📈 Market Update</Text>
             <Text style={styles.responseTime}>{response.timestamp}</Text>
             
-            {response.data.map((stock, index) => (
-              <View key={index} style={styles.stockRow}>
-                <Text style={styles.stockSymbol}>{stock.symbol}</Text>
-                <View style={styles.stockRight}>
-                  <Text style={styles.stockPrice}>₹{stock.price}</Text>
-                  <Text style={[
-                    styles.stockChange,
-                    { color: stock.isUp ? '#00ff00' : '#ff4444' }
-                  ]}>
-                    {stock.isUp ? '▲' : '▼'} {stock.changePercent}%
+            {sinceCheck && (
+              <View style={styles.sinceCheckWrap}>
+                <Text style={styles.sinceCheckLabel}>Since you checked at {sinceCheck.timeLabel} ({sinceCheck.timeAgo})</Text>
+                {sinceCheck.deltas.map((d, i) => (
+                  <Text key={i} style={[styles.sinceCheckDelta, { color: d.isUp ? '#00ff00' : '#ff4444' }]}>
+                    {d.symbol} {d.isUp ? '▲' : '▼'} {d.change}%
                   </Text>
-                </View>
+                ))}
               </View>
-            ))}
+            )}
+            
+            {response.data && response.data.length > 0 ? response.data.map((stock, index) => {
+              const isUS = ['NASDAQ', 'DOW JONES', 'S&P 500'].includes(stock.symbol);
+              const currency = isUS ? '$' : '₹';
+              return (
+                <View key={index} style={styles.stockRow}>
+                  <Text style={styles.stockSymbol}>{stock.symbol}</Text>
+                  <View style={styles.stockRight}>
+                    <Text style={styles.stockPrice}>{currency}{stock.price}</Text>
+                    <Text style={[
+                      styles.stockChange,
+                      { color: stock.isUp ? '#00ff00' : '#ff4444' }
+                    ]}>
+                      {stock.isUp ? '▲' : '▼'} {stock.changePercent}%
+                    </Text>
+                  </View>
+                </View>
+              );
+            }) : null}
             
             {response.error && (
               <Text style={styles.errorText}>{response.error}</Text>
@@ -934,10 +1474,94 @@ export default function App() {
           </View>
         );
         
-      default:
+      case 'cab':
+        if (response.needsConnection) {
+          return (
+            <View style={styles.responseCard}>
+              <Text style={styles.responseTitle}>🚕 Ride</Text>
+              <Text style={styles.responseMessage}>{response.message}</Text>
+              <View style={styles.connectButtons}>
+                <TouchableOpacity style={styles.connectButton} onPress={() => initiateOAuth('nammaYatri')}>
+                  <Text style={styles.connectButtonText}>Connect Namma Yatri</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.connectButton} onPress={() => initiateOAuth('uber')}>
+                  <Text style={styles.connectButtonText}>Connect Uber</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.connectButton} onPress={() => initiateOAuth('ola')}>
+                  <Text style={styles.connectButtonText}>Connect Ola</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.connectButton} onPress={() => initiateOAuth('rapido')}>
+                  <Text style={styles.connectButtonText}>Connect Rapido</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          );
+        }
+        if (response.showAll) {
+          return (
+            <View style={styles.responseCard}>
+              <Text style={styles.responseTitle}>🚕 Ride</Text>
+              <Text style={styles.responseMessage}>{response.message}</Text>
+              <View style={styles.connectButtons}>
+                {response.nammaConnected && (
+                  <TouchableOpacity style={styles.connectButton} onPress={() => { setResponse(null); setTimeout(() => openWithFallback('nammayatri://', 'https://nammayatri.in'), 100); }}>
+                    <Text style={styles.connectButtonText}>Open Namma Yatri</Text>
+                  </TouchableOpacity>
+                )}
+                {response.uberConnected && (
+                  <TouchableOpacity style={styles.connectButton} onPress={() => { setResponse(null); setTimeout(() => openWithFallback('uber://', 'https://m.uber.com'), 100); }}>
+                    <Text style={styles.connectButtonText}>Open Uber</Text>
+                  </TouchableOpacity>
+                )}
+                {response.olaConnected && (
+                  <TouchableOpacity style={styles.connectButton} onPress={() => { setResponse(null); setTimeout(() => openWithFallback('olacabs://', 'https://www.olacabs.com'), 100); }}>
+                    <Text style={styles.connectButtonText}>Open Ola</Text>
+                  </TouchableOpacity>
+                )}
+                {response.rapidoConnected && (
+                  <TouchableOpacity style={styles.connectButton} onPress={() => { setResponse(null); setTimeout(() => openWithFallback('rapido://', 'https://www.rapido.bike'), 100); }}>
+                    <Text style={styles.connectButtonText}>Open Rapido</Text>
+                  </TouchableOpacity>
+                )}
+                {!response.nammaConnected && (
+                  <TouchableOpacity style={styles.connectButton} onPress={() => initiateOAuth('nammaYatri')}>
+                    <Text style={styles.connectButtonText}>Connect Namma Yatri</Text>
+                  </TouchableOpacity>
+                )}
+                {!response.uberConnected && (
+                  <TouchableOpacity style={styles.connectButton} onPress={() => initiateOAuth('uber')}>
+                    <Text style={styles.connectButtonText}>Connect Uber</Text>
+                  </TouchableOpacity>
+                )}
+                {!response.olaConnected && (
+                  <TouchableOpacity style={styles.connectButton} onPress={() => initiateOAuth('ola')}>
+                    <Text style={styles.connectButtonText}>Connect Ola</Text>
+                  </TouchableOpacity>
+                )}
+                {!response.rapidoConnected && (
+                  <TouchableOpacity style={styles.connectButton} onPress={() => initiateOAuth('rapido')}>
+                    <Text style={styles.connectButtonText}>Connect Rapido</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            </View>
+          );
+        }
         return (
           <View style={styles.responseCard}>
+            <Text style={styles.responseTitle}>🚕 {response.source}</Text>
             <Text style={styles.responseMessage}>{response.message}</Text>
+            <TouchableOpacity style={styles.connectButton} onPress={() => { setResponse(null); setTimeout(() => openWithFallback(response.deepLink, CAB_WEB_URLS[response.deepLink] || response.deepLink), 100); }}>
+              <Text style={styles.connectButtonText}>Open {response.source}</Text>
+            </TouchableOpacity>
+          </View>
+        );
+        
+      default:
+        return (
+          <View style={styles.generalResponseCard}>
+            <Text style={styles.generalResponseEmoji}>🤷</Text>
+            <Text style={styles.generalResponseText}>{response.message}</Text>
           </View>
         );
     }
@@ -1027,6 +1651,13 @@ export default function App() {
       scores.calendar = patterns.calendar.count * 1.5;
     }
     
+    // Cab: high score during commute times (morning 7-10, evening 5-8)
+    const isMorningCommute = hour >= 7 && hour <= 10;
+    const isEveningCommute = hour >= 17 && hour <= 20;
+    if (patterns.cab && (isMorningCommute || isEveningCommute)) {
+      scores.cab = patterns.cab.count * 1.5;
+    }
+    
     // Find highest score
     const topCategory = Object.entries(scores).sort((a, b) => b[1] - a[1])[0];
     
@@ -1037,7 +1668,16 @@ export default function App() {
 
   const renderPrediction = () => {
     const prediction = getPrediction();
-    if (!prediction) return null;
+    if (!prediction) {
+      currentPredictionRef.current = null;
+      return null;
+    }
+    
+    // Don't show prediction if contextual card already covers this category
+    if (contextCards.some(c => c.category === prediction)) return null;
+    
+    // Track what we're showing (for accuracy measurement)
+    currentPredictionRef.current = prediction;
     
     const predictions = {
       stocks: {
@@ -1055,17 +1695,25 @@ export default function App() {
         text: 'Check schedule?',
         action: () => handlePredictionTap('calendar'),
       },
+      cab: {
+        emoji: '🚕',
+        text: 'Book a ride?',
+        action: () => handlePredictionTap('cab'),
+      },
     };
     
     const p = predictions[prediction];
     if (!p) return null;
     
     return (
-      <TouchableOpacity style={styles.predictionCard} onPress={p.action}>
-        <Text style={styles.predictionEmoji}>{p.emoji}</Text>
-        <Text style={styles.predictionText}>{p.text}</Text>
-        <Text style={styles.predictionHint}>Tap to go</Text>
-      </TouchableOpacity>
+      <View>
+        <Text style={styles.cardTipLabel}>We learned this from your past behavior</Text>
+        <TouchableOpacity style={styles.predictionCard} onPress={p.action}>
+          <Text style={styles.predictionEmoji}>{p.emoji}</Text>
+          <Text style={styles.predictionText}>{p.text}</Text>
+          <Text style={styles.predictionHint}>Tap to go</Text>
+        </TouchableOpacity>
+      </View>
     );
   };
 
@@ -1083,10 +1731,29 @@ export default function App() {
       case 'calendar':
         result = await handleCalendarQuery();
         break;
+      case 'cab':
+        result = await handleCabQuery();
+        break;
     }
     
     setResponse(result);
     await updatePatterns(type);
+    
+    // Feature 3: Prediction was correct (user tapped it)
+    await trackPredictionResult(type, type);
+    
+    // Feature 5: Count tap saved
+    await incrementTapsSaved();
+    
+    // Bug fix 1: Remove contextual cards for this category
+    setDismissedCategories(prev => new Set([...prev, type]));
+    setContextCards(prev => prev.filter(c => c.category !== type));
+    
+    // Feature 4: Store stock checkpoint
+    if (type === 'stocks' && result?.data?.length > 0) {
+      await storeLastStockCheck(result);
+    }
+    
     setLoading(false);
   };
   // Analyze patterns into insights
@@ -1098,13 +1765,14 @@ export default function App() {
       const p = patterns[key];
       if (p.count < 2) continue;
       
-      // Skip invalid pattern keys
-      if (!key || key === '0' || !isNaN(key)) continue;
+      // Only show valid categories
+      if (!['stocks', 'food', 'cab', 'calendar'].includes(key)) continue;
       
       const emoji = key === 'stocks' ? '📈' : 
                    key === 'food' ? '🍕' : 
                    key === 'calendar' ? '📅' : 
-                   key === 'cricket' ? '🏏' : '⚡';
+                   key === 'cricket' ? '🏏' : 
+                   key === 'cab' ? '🚕' : '⚡';
       
       // Find most common hour
       const hourCounts = {};
@@ -1136,6 +1804,10 @@ export default function App() {
         insight = `You order ${mealTime} around ${hourStr}`;
       } else if (key === 'calendar') {
         insight = `You check schedule around ${hourStr}`;
+      } else if (key === 'cab') {
+        const hour = parseInt(topHour?.[0]);
+        const commuteTime = hour < 12 ? 'morning' : 'evening';
+        insight = `You book ${commuteTime} rides around ${hourStr}`;
       } else {
         insight = `You check ${key} around ${hourStr}`;
       }
@@ -1176,8 +1848,16 @@ export default function App() {
             <Text style={styles.statValue}>{appOpens}</Text>
           </View>
           <View style={styles.statItem}>
-            <Text style={styles.statLabel}>Queries</Text>
-            <Text style={styles.statValue}>{totalQueries}</Text>
+            <Text style={styles.statLabel}>Taps Saved</Text>
+            <Text style={styles.statValue}>{tapsSaved}⚡</Text>
+          </View>
+          <View style={styles.statItem}>
+            <Text style={styles.statLabel}>Accuracy</Text>
+            <Text style={styles.statValue}>
+              {predictionAccuracy.total > 0 
+                ? `${Math.round((predictionAccuracy.correct / predictionAccuracy.total) * 100)}%` 
+                : '—'}
+            </Text>
           </View>
           <View style={styles.statItem}>
             <Text style={styles.statLabel}>Streak</Text>
@@ -1200,7 +1880,7 @@ export default function App() {
           {services.map((service) => (
             <View key={service} style={styles.connectedBadge}>
               <Text style={styles.connectedText}>
-                {service === 'swiggy' ? '🟠' : service === 'zomato' ? '🔴' : '📅'} {service}
+                {service === 'swiggy' ? '🟠' : service === 'zomato' ? '🔴' : service === 'nammaYatri' ? '🟢' : service === 'uber' ? '⚫' : service === 'ola' ? '🟡' : service === 'rapido' ? '🏍️' : '📅'} {service === 'nammaYatri' ? 'Namma Yatri' : service === 'rapido' ? 'Rapido' : service}
               </Text>
             </View>
           ))}
@@ -1241,7 +1921,36 @@ export default function App() {
           keyboardShouldPersistTaps="handled"
         >
           {/* Smart prediction based on patterns */}
-          {renderPrediction()}
+          {!response && renderPrediction()}
+          
+          {/* Contextual cards (time-based, auto-show) */}
+          {contextCards.length > 0 && (
+            <View style={styles.contextSection}>
+              <Text style={styles.cardTipLabel}>Right now might be a good time for this</Text>
+              {contextCards.map((card) => (
+                <TouchableOpacity
+                  key={card.id}
+                  style={styles.contextCard}
+                  onPress={() => handleContextCardTap(card)}
+                >
+                  <Text style={styles.contextEmoji}>{card.emoji}</Text>
+                  <View style={styles.contextTextWrap}>
+                    <Text style={styles.contextTitle}>{card.title}</Text>
+                    <Text style={styles.contextSub}>{card.subtitle}</Text>
+                  </View>
+                </TouchableOpacity>
+              ))}
+            </View>
+          )}
+          
+          {/* Empty state - no cards, no prediction, no response */}
+          {!response && contextCards.length === 0 && !currentPredictionRef.current && Object.keys(patterns).length === 0 && (
+            <View style={styles.emptyState}>
+              <Text style={styles.emptyEmoji}>👋</Text>
+              <Text style={styles.emptyTitle}>Nothing yet</Text>
+              <Text style={styles.emptySub}>Use un-app a few days and it starts learning you. Try stocks, food, cab or calendar.</Text>
+            </View>
+          )}
           
           {/* Pre-loaded suggestion */}
           {preloadedData?.stocks && (
@@ -1263,6 +1972,37 @@ export default function App() {
           
           {/* Patterns */}
           {renderPatterns()}
+          
+          {/* Shareable Flex Card */}
+          <View style={styles.flexCardPlaceholder}>
+            <Text style={styles.flexCardEmoji}>✨</Text>
+            <Text style={styles.flexCardTitle}>YOUR FLEX CARD</Text>
+            {getStreak() >= 7 ? (
+              <View style={styles.flexCardContent}>
+                {predictionAccuracy.total > 0 && (
+                  <Text style={styles.flexCardStat}>
+                    un-app got you right {predictionAccuracy.correct}/{predictionAccuracy.total} times ({Math.round((predictionAccuracy.correct / predictionAccuracy.total) * 100)}%)
+                  </Text>
+                )}
+                {tapsSaved > 0 && (
+                  <Text style={styles.flexCardStat}>
+                    {tapsSaved} taps saved this week ⚡
+                  </Text>
+                )}
+                {weeklyInsight && (
+                  <Text style={styles.flexCardInsight}>"{weeklyInsight}"</Text>
+                )}
+                {!weeklyInsight && !predictionAccuracy.total && (
+                  <Text style={styles.flexCardSub}>Your shareable pattern card is building...</Text>
+                )}
+              </View>
+            ) : (
+              <Text style={styles.flexCardSub}>
+                Unlocks at 7-day streak ({getStreak()}/7)
+              </Text>
+            )}
+            <Text style={styles.flexCardHint}>Soon you'll be able to share this as your flex card</Text>
+          </View>
           
           {/* Connected Services */}
           {renderConnectedServices()}
@@ -1735,5 +2475,161 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#ff6b6b',
     marginTop: 8,
+  },
+  
+  // Contextual Cards
+  contextSection: {
+    marginBottom: 16,
+    gap: 8,
+  },
+  contextCard: {
+    backgroundColor: THEME.darkGray,
+    borderRadius: 12,
+    padding: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderLeftWidth: 3,
+    borderLeftColor: THEME.lime,
+  },
+  contextEmoji: {
+    fontSize: 24,
+    marginRight: 12,
+  },
+  contextTextWrap: {
+    flex: 1,
+  },
+  contextTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: THEME.white,
+  },
+  contextSub: {
+    fontSize: 13,
+    color: THEME.lightGray,
+    marginTop: 2,
+  },
+  // Flex Card Placeholder
+  flexCardPlaceholder: {
+    backgroundColor: THEME.darkGray,
+    borderRadius: 12,
+    padding: 20,
+    marginBottom: 16,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: THEME.mediumGray,
+    borderStyle: 'dashed',
+  },
+  
+  // Empty State
+  emptyState: {
+    alignItems: 'center',
+    paddingVertical: 30,
+    paddingHorizontal: 20,
+  },
+  emptyEmoji: {
+    fontSize: 32,
+    marginBottom: 12,
+  },
+  emptyTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: THEME.white,
+    marginBottom: 8,
+  },
+  emptySub: {
+    fontSize: 13,
+    color: THEME.lightGray,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  flexCardEmoji: {
+    fontSize: 28,
+    marginBottom: 8,
+  },
+  flexCardTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: THEME.lime,
+    letterSpacing: 2,
+    marginBottom: 8,
+  },
+  flexCardSub: {
+    fontSize: 14,
+    color: THEME.white,
+    textAlign: 'center',
+  },
+  flexCardHint: {
+    fontSize: 12,
+    color: THEME.lightGray,
+    marginTop: 8,
+  },
+  
+  // General/error response card
+  generalResponseCard: {
+    backgroundColor: THEME.darkGray,
+    borderRadius: 12,
+    padding: 24,
+    marginBottom: 16,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: THEME.mediumGray,
+  },
+  generalResponseEmoji: {
+    fontSize: 28,
+    marginBottom: 10,
+  },
+  generalResponseText: {
+    fontSize: 16,
+    color: THEME.white,
+    textAlign: 'center',
+    lineHeight: 24,
+  },
+  
+  // Card tip labels
+  cardTipLabel: {
+    fontSize: 11,
+    color: THEME.lightGray,
+    marginBottom: 6,
+    marginLeft: 4,
+    fontStyle: 'italic',
+  },
+  
+  // Since you last checked
+  sinceCheckWrap: {
+    backgroundColor: THEME.mediumGray,
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 12,
+  },
+  sinceCheckLabel: {
+    fontSize: 12,
+    color: THEME.lightGray,
+    marginBottom: 4,
+  },
+  sinceCheckDelta: {
+    fontSize: 13,
+    fontWeight: '600',
+    marginTop: 2,
+  },
+  
+  // Flex card content
+  flexCardContent: {
+    alignItems: 'center',
+    width: '100%',
+  },
+  flexCardStat: {
+    fontSize: 13,
+    color: THEME.white,
+    textAlign: 'center',
+    marginBottom: 4,
+  },
+  flexCardInsight: {
+    fontSize: 13,
+    color: THEME.lime,
+    textAlign: 'center',
+    fontStyle: 'italic',
+    marginTop: 6,
+    paddingHorizontal: 10,
+    lineHeight: 20,
   },
 });

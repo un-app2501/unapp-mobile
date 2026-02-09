@@ -2,7 +2,7 @@
   "expo": {
     "name": "un-app",
     "slug": "unapp",
-    "version": "1.0.0",
+    "version": "0.2.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -17,16 +17,17 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "ai.unapp.mobile",
-      "buildNumber": "1",
+      "buildNumber": "5",
       "infoPlist": {
         "NSCameraUsageDescription": "un-app does not use your camera",
         "LSApplicationQueriesSchemes": [
           "swiggy",
           "zomato",
           "googlecalendar",
-          "swiggy",
-          "zomato",
-          "googlecalendar"
+          "nammayatri",
+          "uber",
+          "olacabs",
+          "rapido"
         ],
         "ITSAppUsesNonExemptEncryption": false
       }
