@@ -19,6 +19,116 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { StatusBar } from 'expo-status-bar';
 import { WebView } from 'react-native-webview';
+import * as Calendar from 'expo-calendar';
+
+// ============================================
+// v0.2 NEW: CRICKET API (cricketdata.org)
+// ============================================
+const CRICKET_API_KEY = '865feb36-5923-4661-bb07-adb19c69f648'; // Free tier: https://cricketdata.org
+const fetchCricketScores = async () => {
+  try {
+    const res = await fetch(
+      `https://api.cricapi.com/v1/currentMatches?apikey=${CRICKET_API_KEY}&offset=0`
+    );
+    if (!res.ok) return { type: 'cricket', data: [], error: 'Cricket API unavailable' };
+    const json = await res.json();
+    if (!json.data || !Array.isArray(json.data)) return { type: 'cricket', data: [], error: 'No matches right now' };
+
+    const matches = json.data.slice(0, 5).map(m => ({
+      id: m.id || String(Math.random()),
+      status: m.matchStarted && !m.matchEnded ? 'live' : m.matchEnded ? 'completed' : 'upcoming',
+      teams: { home: m.teams?.[0] || 'TBD', away: m.teams?.[1] || 'TBD' },
+      score: {
+        home: m.score?.[0] ? `${m.score[0].r}/${m.score[0].w} (${m.score[0].o})` : null,
+        away: m.score?.[1] ? `${m.score[1].r}/${m.score[1].w} (${m.score[1].o})` : null,
+      },
+      format: (m.matchType || '').toUpperCase() === 'T20' ? 'T20'
+            : (m.matchType || '').toUpperCase() === 'ODI' ? 'ODI' : 'Test',
+      name: m.name || '',
+    }));
+    return { type: 'cricket', data: matches, timestamp: new Date().toLocaleTimeString() };
+  } catch (e) {
+    console.log('Cricket fetch error:', e);
+    return { type: 'cricket', data: [], error: 'Could not fetch cricket scores. Check your connection.' };
+  }
+};
+
+// ============================================
+// v0.2 NEW: CALENDAR (EventKit) HANDLER
+// ============================================
+const fetchCalendarInsights = async () => {
+  try {
+    const { status } = await Calendar.requestCalendarPermissionsAsync();
+    if (status !== 'granted') {
+      return { type: 'eventkit_calendar', denied: true };
+    }
+    const calendars = await Calendar.getCalendarsAsync(Calendar.EntityTypes.EVENT);
+    const calendarIds = calendars.map(c => c.id);
+
+    const now = new Date();
+    const endOfDay = new Date(now);
+    endOfDay.setHours(23, 59, 59, 999);
+
+    const events = await Calendar.getEventsAsync(calendarIds, now, endOfDay);
+
+    // Extract temporal data only — no event content stored
+    const slots = events.map(ev => {
+      const start = new Date(ev.startDate);
+      const end = new Date(ev.endDate);
+      return {
+        hourOfDay: start.getHours(),
+        minuteOfHour: start.getMinutes(),
+        duration: Math.round((end - start) / 60000),
+        title: ev.title || 'Busy', // shown briefly, never persisted
+      };
+    });
+
+    // Find next free gap (look for 1hr+ gap between events)
+    const sortedSlots = slots.sort((a, b) => a.hourOfDay - b.hourOfDay || a.minuteOfHour - b.minuteOfHour);
+    let nextFreeGap = null;
+    const currentMinutes = now.getHours() * 60 + now.getMinutes();
+
+    // Check gaps between consecutive events
+    for (let i = 0; i < sortedSlots.length - 1; i++) {
+      const endOfCurrent = sortedSlots[i].hourOfDay * 60 + sortedSlots[i].minuteOfHour + sortedSlots[i].duration;
+      const startOfNext = sortedSlots[i + 1].hourOfDay * 60 + sortedSlots[i + 1].minuteOfHour;
+      if (startOfNext - endOfCurrent >= 60 && endOfCurrent > currentMinutes) {
+        const gapHour = Math.floor(endOfCurrent / 60);
+        const gapMin = endOfCurrent % 60;
+        nextFreeGap = `${gapHour > 12 ? gapHour - 12 : gapHour}:${gapMin.toString().padStart(2, '0')} ${gapHour >= 12 ? 'PM' : 'AM'}`;
+        break;
+      }
+    }
+
+    // If no events left today or gap after last event
+    if (!nextFreeGap && sortedSlots.length > 0) {
+      const lastEnd = sortedSlots[sortedSlots.length - 1].hourOfDay * 60 + sortedSlots[sortedSlots.length - 1].minuteOfHour + sortedSlots[sortedSlots.length - 1].duration;
+      if (lastEnd > currentMinutes && lastEnd < 20 * 60) {
+        const h = Math.floor(lastEnd / 60);
+        const m = lastEnd % 60;
+        nextFreeGap = `${h > 12 ? h - 12 : h}:${m.toString().padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
+      }
+    }
+    if (!nextFreeGap && sortedSlots.length === 0) {
+      nextFreeGap = 'All day';
+    }
+
+    return {
+      type: 'eventkit_calendar',
+      events: slots.map(s => ({
+        time: `${s.hourOfDay > 12 ? s.hourOfDay - 12 : s.hourOfDay}:${s.minuteOfHour.toString().padStart(2, '0')} ${s.hourOfDay >= 12 ? 'PM' : 'AM'}`,
+        title: s.title,
+        duration: s.duration,
+      })),
+      totalToday: slots.length,
+      nextFreeGap,
+      timestamp: new Date().toLocaleTimeString(),
+    };
+  } catch (e) {
+    console.log('Calendar error:', e);
+    return { type: 'eventkit_calendar', error: 'Could not read calendar' };
+  }
+};
 // ============================================
 // ANALYTICS (Supabase)
 // ============================================
@@ -80,6 +190,12 @@ const STORAGE_KEYS = {
   lastStockCheck: 'unapp_last_stock_check',
   weeklyInsight: 'unapp_weekly_insight',
   lastInsightDate: 'unapp_last_insight_date',
+  // v0.2 new feature keys
+  cricketPattern: 'unapp_cricket_pattern',
+  cricketCheckLog: 'unapp_cricket_check_log',
+  calendarPattern: 'unapp_calendar_pattern',
+  sharePattern: 'unapp_share_pattern',
+  shareItems: 'unapp_share_items',
 };
 
 // ============================================
@@ -412,6 +528,7 @@ export default function App() {
               action: connectedServices.nammaYatri || connectedServices.uber || connectedServices.ola || connectedServices.rapido ? 'open_cab' : 'connect_cab',
             },
             calendar: { emoji: '📅', title: 'Check schedule?', action: 'check_calendar' },
+            cricket: { emoji: '🏏', title: 'Check cricket?', action: 'check_cricket' },
           };
           
           const config = cardConfig[category];
@@ -431,6 +548,51 @@ export default function App() {
     }
     
     setContextCards(cards.filter(c => !dismissedCategories.has(c.category)));
+    
+    // v0.2: Async context cards (cricket + calendar)
+    // These run after initial sync cards are set
+    (async () => {
+      const asyncCards = [];
+      
+      // Cricket: show card if there are live matches
+      if (!dismissedCategories.has('cricket')) {
+        try {
+          const cricketResult = await fetchCricketScores();
+          const liveMatches = (cricketResult.data || []).filter(m => m.status === 'live');
+          if (liveMatches.length > 0) {
+            asyncCards.push({
+              id: 'cricket_live',
+              emoji: '🏏',
+              title: `${liveMatches.length} match${liveMatches.length > 1 ? 'es' : ''} live`,
+              subtitle: `${liveMatches[0].teams.home} vs ${liveMatches[0].teams.away}`,
+              action: 'check_cricket',
+              category: 'cricket',
+            });
+          }
+        } catch (e) {}
+      }
+      
+      // Calendar free gap: show if user has calendar access
+      if (!dismissedCategories.has('calendar_gap') && !addedCategories.has('calendar')) {
+        try {
+          const calResult = await fetchCalendarInsights();
+          if (calResult.nextFreeGap && calResult.totalToday > 0) {
+            asyncCards.push({
+              id: 'calendar_free',
+              emoji: '📅',
+              title: `Free at ${calResult.nextFreeGap}`,
+              subtitle: `${calResult.totalToday} events today`,
+              action: 'check_calendar',
+              category: 'calendar',
+            });
+          }
+        } catch (e) {}
+      }
+      
+      if (asyncCards.length > 0) {
+        setContextCards(prev => [...prev, ...asyncCards.filter(c => !dismissedCategories.has(c.category))]);
+      }
+    })();
   };
 
   const handleContextCardTap = async (card) => {
@@ -478,6 +640,20 @@ export default function App() {
         setResponse(calResult);
         await updatePatterns('calendar');
         break;
+      case 'check_cricket':
+        setLoading(true);
+        const cricketResult = await fetchCricketScores();
+        setResponse(cricketResult);
+        // Track cricket check behavior
+        try {
+          const cLog = await AsyncStorage.getItem(STORAGE_KEYS.cricketCheckLog);
+          const log = cLog ? JSON.parse(cLog) : [];
+          log.unshift({ timestamp: Date.now(), hour: new Date().getHours(), day: new Date().getDay() });
+          if (log.length > 200) log.length = 200;
+          await AsyncStorage.setItem(STORAGE_KEYS.cricketCheckLog, JSON.stringify(log));
+        } catch (e) {}
+        setLoading(false);
+        break;
     }
     
     // Remove tapped card AND prevent regeneration
@@ -500,7 +676,7 @@ export default function App() {
         try {
           const parsed = JSON.parse(storedPatterns);
           // Clean invalid pattern keys + remove general/cricket
-          const validCategories = ['stocks', 'food', 'cab', 'calendar'];
+          const validCategories = ['stocks', 'food', 'cab', 'calendar', 'cricket'];
           const cleaned = {};
           for (const key of Object.keys(parsed)) {
             if (validCategories.includes(key) && parsed[key].count >= 1) {
@@ -659,7 +835,7 @@ export default function App() {
           max_tokens: 150,
           messages: [{
             role: 'user',
-            content: `You are un-app's behavioral AI. Given this user's anonymous app usage patterns from the past week, write ONE short casual behavioral insight (max 2 sentences). Be specific about what you notice. Be witty, not generic. No emojis. Patterns: ${JSON.stringify(patternSummary)}`,
+            content: `You are un-app's behavioral AI. Given this user's anonymous app usage patterns from the past week, write ONE short casual behavioral insight (max 2 sentences). Be specific about WHEN patterns — times of day, days of week, frequencies. Be witty, not generic. No emojis. Patterns: ${JSON.stringify(patternSummary)}`,
           }],
         }),
       });
@@ -843,11 +1019,15 @@ export default function App() {
           break;
           
         case 'cricket':
-          result = {
-            type: 'cricket',
-            message: 'Cricket is on our radar. Hunting for a solid API to bring scores here.',
-            status: 'pending',
-          };
+          result = await fetchCricketScores();
+          // Track cricket check behavior
+          try {
+            const cLog = await AsyncStorage.getItem(STORAGE_KEYS.cricketCheckLog);
+            const log = cLog ? JSON.parse(cLog) : [];
+            log.unshift({ timestamp: Date.now(), hour: new Date().getHours(), day: new Date().getDay() });
+            if (log.length > 200) log.length = 200;
+            await AsyncStorage.setItem(STORAGE_KEYS.cricketCheckLog, JSON.stringify(log));
+          } catch (e) {}
           break;
           
         case 'cab':
@@ -864,18 +1044,19 @@ export default function App() {
       setResponse(result);
       
       // Bug fix 1: Remove contextual cards for this category and prevent regeneration
-      if (result?.type && ['stocks', 'food', 'cab', 'calendar'].includes(result.type)) {
-        setDismissedCategories(prev => new Set([...prev, result.type]));
-        setContextCards(prev => prev.filter(c => c.category !== result.type));
+      if (result?.type && ['stocks', 'food', 'cab', 'calendar', 'eventkit_calendar', 'cricket'].includes(result.type)) {
+        const dismissType = result.type === 'eventkit_calendar' ? 'calendar' : result.type;
+        setDismissedCategories(prev => new Set([...prev, dismissType]));
+        setContextCards(prev => prev.filter(c => c.category !== dismissType));
       }
       
       // Bug fix 2: Only track patterns for valid categories
-      if (['stocks', 'food', 'cab', 'calendar'].includes(queryType)) {
+      if (['stocks', 'food', 'cab', 'calendar', 'cricket'].includes(queryType)) {
         await updatePatterns(queryType);
       }
       
       // Feature 3: Track prediction accuracy (only for typed queries, not card taps)
-      if (currentPredictionRef.current && ['stocks', 'food', 'cab', 'calendar'].includes(queryType)) {
+      if (currentPredictionRef.current && ['stocks', 'food', 'cab', 'calendar', 'cricket'].includes(queryType)) {
         await trackPredictionResult(currentPredictionRef.current, queryType);
       }
       
@@ -1001,58 +1182,20 @@ export default function App() {
   // CALENDAR QUERY
   // ============================================
   const handleCalendarQuery = async () => {
-    const isCalendarConnected = connectedServices.calendar;
+    // v0.2: Use native EventKit instead of Google Calendar OAuth
+    const result = await fetchCalendarInsights();
     
-    if (!isCalendarConnected) {
+    if (result.denied) {
       return {
         type: 'calendar',
-        needsConnection: true,
-        message: 'Connect to see your schedule',
-        services: ['calendar'],
+        needsPermission: true,
+        message: 'Grant calendar access to see your schedule',
       };
     }
-    
-    return {
-      type: 'calendar',
-      connected: true,
-      message: 'Open Google Calendar',
-      deepLink: 'googlecalendar://',
-    };
-    
-    // Fetch calendar events using Google Calendar API
-    try {
-      const today = new Date();
-      const tomorrow = new Date(today);
-      tomorrow.setDate(tomorrow.getDate() + 1);
-      
-      const response = await fetch(
-        `https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${today.toISOString()}&timeMax=${tomorrow.toISOString()}&singleEvents=true&orderBy=startTime`,
-        {
-          headers: {
-            Authorization: `Bearer ${calendarToken}`,
-          },
-        }
-      );
-      
-      if (response.status === 401) {
-        await AsyncStorage.removeItem(STORAGE_KEYS.calendarToken);
-        return handleCalendarQuery();
-      }
-      
-      const data = await response.json();
-      
-      return {
-        type: 'calendar',
-        events: data.items || [],
-        date: today.toDateString(),
-      };
-    } catch (error) {
-      return {
-        type: 'calendar',
-        error: 'Could not fetch calendar',
-        message: error.message,
-      };
+    if (result.error) {
+      return { type: 'calendar', error: result.error, message: result.error };
     }
+    return result;
   };
 
   // ============================================
@@ -1434,35 +1577,74 @@ export default function App() {
           </View>
         );
         
+      case 'eventkit_calendar':
       case 'calendar':
         if (response.needsConnection) {
           return (
             <View style={styles.responseCard}>
               <Text style={styles.responseTitle}>📅 Calendar</Text>
               <Text style={styles.responseMessage}>{response.message}</Text>
-              
-              <TouchableOpacity
-                style={styles.connectButton}
-                onPress={() => initiateOAuth('calendar')}
-              >
+              <TouchableOpacity style={styles.connectButton} onPress={() => initiateOAuth('calendar')}>
                 <Text style={styles.connectButtonText}>Connect Calendar</Text>
               </TouchableOpacity>
+            </View>
+          );
+        }
+        // v0.2: EventKit calendar with permission prompt
+        if (response.needsPermission) {
+          return (
+            <View style={styles.responseCard}>
+              <Text style={styles.responseTitle}>📅 Calendar</Text>
+              <Text style={styles.responseMessage}>{response.message}</Text>
+              <Text style={{ fontSize: 12, color: THEME.lightGray, marginTop: 8 }}>
+                Go to Settings → un-app → Calendar to enable
+              </Text>
+            </View>
+          );
+        }
+        // v0.2: EventKit results
+        if (response.type === 'eventkit_calendar') {
+          return (
+            <View style={styles.responseCard}>
+              <Text style={styles.responseTitle}>📅 Today's Schedule</Text>
+              <Text style={styles.responseTime}>{response.timestamp}</Text>
+              
+              {response.nextFreeGap && (
+                <View style={[styles.sinceCheckWrap, { borderLeftWidth: 3, borderLeftColor: THEME.lime }]}>
+                  <Text style={{ fontSize: 13, color: THEME.lime, fontWeight: '600' }}>
+                    Next free: {response.nextFreeGap}
+                  </Text>
+                </View>
+              )}
+              
+              {response.events && response.events.length > 0 ? response.events.map((ev, i) => (
+                <View key={i} style={styles.eventRow}>
+                  <Text style={styles.eventTime}>{ev.time}</Text>
+                  <Text style={styles.eventTitle}>{ev.title}</Text>
+                  <Text style={{ fontSize: 11, color: THEME.lightGray }}>{ev.duration}m</Text>
+                </View>
+              )) : (
+                <Text style={styles.noEvents}>No more events today — you're free</Text>
+              )}
+              
+              <Text style={{ fontSize: 11, color: THEME.lightGray, marginTop: 10 }}>
+                {response.totalToday} event{response.totalToday !== 1 ? 's' : ''} remaining today
+              </Text>
             </View>
           );
         }
         return (
           <View style={styles.responseCard}>
             <Text style={styles.responseTitle}>📅 Calendar</Text>
-            <Text style={styles.responseMessage}>{response.message}</Text>
-            <TouchableOpacity
-              style={styles.connectButton}
-              onPress={() => {
-              setResponse(null);
-              setTimeout(() => Linking.openURL(response.deepLink), 100);
-            }}
-            >
-              <Text style={styles.connectButtonText}>Open Calendar</Text>
-            </TouchableOpacity>
+            <Text style={styles.responseMessage}>{response.message || response.error}</Text>
+            {response.deepLink && (
+              <TouchableOpacity style={styles.connectButton} onPress={() => {
+                setResponse(null);
+                setTimeout(() => Linking.openURL(response.deepLink), 100);
+              }}>
+                <Text style={styles.connectButtonText}>Open Calendar</Text>
+              </TouchableOpacity>
+            )}
           </View>
         );
         
@@ -1470,7 +1652,33 @@ export default function App() {
         return (
           <View style={styles.responseCard}>
             <Text style={styles.responseTitle}>🏏 Cricket</Text>
-            <Text style={styles.responseMessage}>{response.message}</Text>
+            {response.timestamp && <Text style={styles.responseTime}>{response.timestamp}</Text>}
+            {response.error && <Text style={styles.responseMessage}>{response.error}</Text>}
+            {response.data && response.data.length > 0 ? response.data.map((match, i) => (
+              <View key={i} style={[styles.stockRow, { flexDirection: 'column', alignItems: 'flex-start', paddingVertical: 10 }]}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 4 }}>
+                  <View style={{
+                    backgroundColor: match.status === 'live' ? '#ff4444' : match.status === 'completed' ? THEME.lightGray : THEME.lime,
+                    paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, marginRight: 8,
+                  }}>
+                    <Text style={{ fontSize: 10, fontWeight: '700', color: match.status === 'live' ? '#fff' : THEME.black }}>
+                      {match.status === 'live' ? 'LIVE' : match.status === 'completed' ? 'DONE' : 'SOON'}
+                    </Text>
+                  </View>
+                  <Text style={{ fontSize: 11, color: THEME.lightGray }}>{match.format}</Text>
+                </View>
+                <Text style={{ fontSize: 14, color: THEME.white, fontWeight: '600' }}>
+                  {match.teams.home} {match.score.home || ''} 
+                </Text>
+                <Text style={{ fontSize: 14, color: THEME.white, fontWeight: '600' }}>
+                  {match.teams.away} {match.score.away || ''}
+                </Text>
+                {match.name ? <Text style={{ fontSize: 11, color: THEME.lightGray, marginTop: 2 }}>{match.name}</Text> : null}
+              </View>
+            )) : null}
+            {(!response.data || response.data.length === 0) && !response.error && (
+              <Text style={styles.responseMessage}>No matches right now</Text>
+            )}
           </View>
         );
         
@@ -1658,6 +1866,16 @@ export default function App() {
       scores.cab = patterns.cab.count * 1.5;
     }
     
+    // Cricket: high score during typical match times (afternoon/evening)
+    const isCricketTime = hour >= 14 && hour <= 22;
+    if (patterns.cricket && isCricketTime) {
+      const avgHour = patterns.cricket.times?.length > 0
+        ? patterns.cricket.times.reduce((a, b) => a + b, 0) / patterns.cricket.times.length
+        : 19;
+      const hourMatch = Math.abs(hour - avgHour) < 2 ? 1.5 : 1;
+      scores.cricket = patterns.cricket.count * hourMatch;
+    }
+    
     // Find highest score
     const topCategory = Object.entries(scores).sort((a, b) => b[1] - a[1])[0];
     
@@ -1700,6 +1918,11 @@ export default function App() {
         text: 'Book a ride?',
         action: () => handlePredictionTap('cab'),
       },
+      cricket: {
+        emoji: '🏏',
+        text: 'Check cricket?',
+        action: () => handlePredictionTap('cricket'),
+      },
     };
     
     const p = predictions[prediction];
@@ -1734,6 +1957,9 @@ export default function App() {
       case 'cab':
         result = await handleCabQuery();
         break;
+      case 'cricket':
+        result = await fetchCricketScores();
+        break;
     }
     
     setResponse(result);
@@ -1766,7 +1992,7 @@ export default function App() {
       if (p.count < 2) continue;
       
       // Only show valid categories
-      if (!['stocks', 'food', 'cab', 'calendar'].includes(key)) continue;
+      if (!['stocks', 'food', 'cab', 'calendar', 'cricket'].includes(key)) continue;
       
       const emoji = key === 'stocks' ? '📈' : 
                    key === 'food' ? '🍕' : 
@@ -1808,6 +2034,8 @@ export default function App() {
         const hour = parseInt(topHour?.[0]);
         const commuteTime = hour < 12 ? 'morning' : 'evening';
         insight = `You book ${commuteTime} rides around ${hourStr}`;
+      } else if (key === 'cricket') {
+        insight = `You check cricket around ${hourStr}`;
       } else {
         insight = `You check ${key} around ${hourStr}`;
       }
