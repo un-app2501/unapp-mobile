@@ -20,7 +20,7 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "ai.unapp.mobile",
-      "buildNumber": "5",
+      "buildNumber": "6",
       "infoPlist": {
         "NSCameraUsageDescription": "un-app does not use your camera",
         "NSCalendarsUsageDescription": "un-app learns WHEN you're busy to predict your needs better",
