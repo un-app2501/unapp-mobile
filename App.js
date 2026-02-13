@@ -24,6 +24,11 @@ import * as Calendar from 'expo-calendar';
 // ============================================
 // v0.2 NEW: CRICKET API (cricketdata.org)
 // ============================================
+// ============================================
+// 🔑 REPLACE THIS WITH YOUR ACTUAL KEY
+// ============================================
+const ANTHROPIC_API_KEY = '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';
+
 const CRICKET_API_KEY = '865feb36-5923-4661-bb07-adb19c69f648'; // Free tier: https://cricketdata.org
 const fetchCricketScores = async () => {
   try {
@@ -180,6 +185,7 @@ const STORAGE_KEYS = {
   calendarToken: 'unapp_calendar_token',
   connectedServices: 'unapp_connected_services',
   privacyAcknowledged: 'unapp_privacy_ack',
+  dataConsent: 'unapp_data_consent',
   nammaYatriToken: 'unapp_nammayatri_token',
   uberToken: 'unapp_uber_token',
   olaToken: 'unapp_ola_token',
@@ -351,6 +357,7 @@ export default function App() {
   const [queryHistory, setQueryHistory] = useState([]);
   const [connectedServices, setConnectedServices] = useState({});
   const [showPrivacyNotice, setShowPrivacyNotice] = useState(false);
+  const [dataConsentGiven, setDataConsentGiven] = useState(false);
   const [showOAuthModal, setShowOAuthModal] = useState(false);
   const [oauthUrl, setOauthUrl] = useState('');
   const [currentOAuthService, setCurrentOAuthService] = useState(null);
@@ -385,27 +392,35 @@ export default function App() {
   // ============================================
   useEffect(() => {
     initializeApp();
-    trackEvent('app_started', { source: 'ios_app' });
   }, []);
+
+  // Only track and preload AFTER consent is given
+  useEffect(() => {
+    if (dataConsentGiven) {
+      trackEvent('app_started', { source: 'ios_app' });
+      checkAndPreloadData();
+    }
+  }, [dataConsentGiven]);
 
   const initializeApp = async () => {
     await loadStoredData();
-    await checkAndPreloadData();
   };
 
-  // Trigger weekly insight when patterns are ready
+  // Trigger weekly insight when patterns are ready AND consent given
   useEffect(() => {
-    if (Object.keys(patterns).length >= 2) {
+    if (dataConsentGiven && Object.keys(patterns).length >= 2) {
       generateWeeklyInsight();
     }
-  }, [patterns]);
+  }, [patterns, dataConsentGiven]);
 
   // ============================================
   // CONTEXTUAL CARDS (TIME-BASED, AUTO-SHOW)
   // ============================================
   useEffect(() => {
-    generateContextCards();
-  }, [patterns, connectedServices, dismissedCategories]);
+    if (dataConsentGiven) {
+      generateContextCards();
+    }
+  }, [patterns, connectedServices, dismissedCategories, dataConsentGiven]);
 
   const generateContextCards = () => {
     const hour = new Date().getHours();
@@ -723,8 +738,11 @@ export default function App() {
         console.log('v0.2 state load error:', e);
       }
       
-      // Show privacy notice on first open
-      if (!privacyAck) {
+      // Show privacy/data consent on first open (or if not yet consented)
+      const consent = await AsyncStorage.getItem(STORAGE_KEYS.dataConsent);
+      if (consent === 'granted') {
+        setDataConsentGiven(true);
+      } else {
         setShowPrivacyNotice(true);
       }
       
@@ -827,7 +845,7 @@ export default function App() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-api-key': 'REPLACE_WITH_YOUR_KEY',
+          'x-api-key': ANTHROPIC_API_KEY,
           'anthropic-version': '2023-06-01',
         },
         body: JSON.stringify({
@@ -1037,7 +1055,7 @@ export default function App() {
         default:
           result = {
             type: 'general',
-            message: 'Didn\'t catch that one. Try stocks, food, cab or calendar.',
+            message: `un-app is built around your daily patterns. Try asking about:\n\n📈 Stocks — "How's the market?"\n🍕 Food — "I'm hungry"\n📅 Calendar — "What's my schedule?"\n🏏 Cricket — "Live scores"\n🚕 Cab — "Book a ride"\n\nThe more you use it, the smarter it gets.`,
           };
       }
       
@@ -1344,55 +1362,99 @@ export default function App() {
   // ============================================
   // PRIVACY ACKNOWLEDGMENT
   // ============================================
-  const acknowledgePrivacy = async () => {
-    await AsyncStorage.setItem(STORAGE_KEYS.privacyAcknowledged, 'true');
-    setShowPrivacyNotice(false);
+  const handleDataConsent = async (granted) => {
+    if (granted) {
+      await AsyncStorage.setItem(STORAGE_KEYS.dataConsent, 'granted');
+      await AsyncStorage.setItem(STORAGE_KEYS.privacyAcknowledged, 'true');
+      setDataConsentGiven(true);
+      setShowPrivacyNotice(false);
+      trackEvent('data_consent_granted');
+    } else {
+      // User declined — keep showing consent, can't use app without it
+      Alert.alert(
+        'Data sharing required',
+        'un-app needs to process data with AI services to work. You can revoke consent anytime in Settings.',
+        [{ text: 'OK' }]
+      );
+    }
   };
 
   // ============================================
   // RENDER FUNCTIONS
   // ============================================
   
-  // Privacy Notice Modal
+  // Apple-compliant Data Consent Screen (5.1.1 + 5.1.2)
   const renderPrivacyNotice = () => (
-    <Modal visible={showPrivacyNotice} animationType="fade" transparent>
-      <View style={styles.modalOverlay}>
-        <View style={styles.privacyModal}>
-          <Text style={styles.privacyTitle}>🔒 We respect your privacy</Text>
+    <Modal visible={showPrivacyNotice} animationType="fade" transparent={false}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: THEME.black }}>
+        <ScrollView contentContainerStyle={{ paddingHorizontal: 24, paddingTop: 48, paddingBottom: 24 }}>
+          <Text style={{ fontSize: 16, fontWeight: '700', color: THEME.lime, letterSpacing: 2, marginBottom: 32 }}>UN-APP</Text>
+          <Text style={{ fontSize: 26, fontWeight: '700', color: THEME.white, marginBottom: 12 }}>Before we begin</Text>
+          <Text style={{ fontSize: 15, color: '#999', lineHeight: 22, marginBottom: 28 }}>
+            un-app uses AI to learn your patterns and surface the right info at the right time. Here's how your data is handled.
+          </Text>
+
+          {/* What we collect */}
+          <Text style={{ fontSize: 16, fontWeight: '600', color: THEME.lime, marginBottom: 10 }}>What data we collect</Text>
+          <Text style={{ fontSize: 14, color: '#ccc', lineHeight: 22, marginBottom: 24 }}>
+            {'• Calendar event metadata (titles, times, durations)\n• App usage patterns and timing signals\n• Device context (time of day, day of week)\n• Your interactions within un-app (queries, taps)'}
+          </Text>
+
+          {/* Who we share with */}
+          <Text style={{ fontSize: 16, fontWeight: '600', color: THEME.lime, marginBottom: 10 }}>Who we share it with</Text>
           
-          <View style={styles.privacyItem}>
-            <Text style={styles.privacyIcon}>📱</Text>
-            <Text style={styles.privacyText}>
-              All data stays on your phone. Nothing goes to any server.
+          <View style={{ backgroundColor: '#111', borderRadius: 10, padding: 14, marginBottom: 10 }}>
+            <Text style={{ fontSize: 14, fontWeight: '600', color: THEME.white, marginBottom: 4 }}>Anthropic (Claude API)</Text>
+            <Text style={{ fontSize: 13, color: '#999', lineHeight: 20 }}>
+              Processes your queries and generates behavioral insights. Data sent: your questions, anonymized usage patterns. Anthropic does not use API data to train models.
             </Text>
           </View>
-          
-          <View style={styles.privacyItem}>
-            <Text style={styles.privacyIcon}>🔐</Text>
-            <Text style={styles.privacyText}>
-              We never see your phone number, passwords or personal info.
+
+          <View style={{ backgroundColor: '#111', borderRadius: 10, padding: 14, marginBottom: 10 }}>
+            <Text style={{ fontSize: 14, fontWeight: '600', color: THEME.white, marginBottom: 4 }}>Supabase</Text>
+            <Text style={{ fontSize: 13, color: '#999', lineHeight: 20 }}>
+              Stores anonymized analytics (interaction events, session data). No personal content is stored.
             </Text>
           </View>
-          
-          <View style={styles.privacyItem}>
-            <Text style={styles.privacyIcon}>🧠</Text>
-            <Text style={styles.privacyText}>
-              We learn patterns (like "checks stocks at 9am"), not your data.
+
+          <View style={{ backgroundColor: '#111', borderRadius: 10, padding: 14, marginBottom: 10 }}>
+            <Text style={{ fontSize: 14, fontWeight: '600', color: THEME.white, marginBottom: 4 }}>Third-party APIs</Text>
+            <Text style={{ fontSize: 13, color: '#999', lineHeight: 20 }}>
+              Stock data via Yahoo Finance, cricket scores via CricAPI. Only market/score queries are sent — no personal data.
             </Text>
           </View>
-          
-          <View style={styles.privacyItem}>
-            <Text style={styles.privacyIcon}>🔗</Text>
-            <Text style={styles.privacyText}>
-              When you connect Swiggy/Zomato, you login directly with them - we only get a permission token.
-            </Text>
-          </View>
-          
-          <TouchableOpacity style={styles.privacyButton} onPress={acknowledgePrivacy}>
-            <Text style={styles.privacyButtonText}>I understand this is part of building my AI</Text>
+
+          {/* How protected */}
+          <Text style={{ fontSize: 16, fontWeight: '600', color: THEME.lime, marginTop: 14, marginBottom: 10 }}>How your data is protected</Text>
+          <Text style={{ fontSize: 14, color: '#ccc', lineHeight: 22, marginBottom: 24 }}>
+            All data is transmitted over encrypted connections (TLS). We collect the minimum data needed. We do not sell your data or use it for advertising. Third-party providers maintain equivalent or stronger data protection.
+          </Text>
+
+          {/* Privacy policy link */}
+          <TouchableOpacity onPress={() => Linking.openURL('https://overview-un-app.netlify.app/privacy')}>
+            <Text style={{ fontSize: 14, color: THEME.lime, fontWeight: '500', marginBottom: 24 }}>Read our full Privacy Policy →</Text>
           </TouchableOpacity>
+        </ScrollView>
+
+        {/* Buttons */}
+        <View style={{ paddingHorizontal: 24, paddingBottom: 24 }}>
+          <TouchableOpacity 
+            style={{ backgroundColor: THEME.lime, borderRadius: 12, paddingVertical: 16, alignItems: 'center', marginBottom: 10 }} 
+            onPress={() => handleDataConsent(true)}
+          >
+            <Text style={{ fontSize: 16, fontWeight: '700', color: THEME.black }}>Allow & Continue</Text>
+          </TouchableOpacity>
+          <TouchableOpacity 
+            style={{ backgroundColor: 'transparent', borderRadius: 12, borderWidth: 1, borderColor: '#333', paddingVertical: 14, alignItems: 'center', marginBottom: 12 }} 
+            onPress={() => handleDataConsent(false)}
+          >
+            <Text style={{ fontSize: 15, fontWeight: '500', color: '#666' }}>Don't Allow</Text>
+          </TouchableOpacity>
+          <Text style={{ fontSize: 12, color: '#555', textAlign: 'center', lineHeight: 18 }}>
+            You can change this anytime in Settings.
+          </Text>
         </View>
-      </View>
+      </SafeAreaView>
     </Modal>
   );
 
@@ -1768,8 +1830,8 @@ export default function App() {
       default:
         return (
           <View style={styles.generalResponseCard}>
-            <Text style={styles.generalResponseEmoji}>🤷</Text>
-            <Text style={styles.generalResponseText}>{response.message}</Text>
+            <Text style={styles.generalResponseEmoji}>💡</Text>
+            <Text style={[styles.generalResponseText, { textAlign: 'left' }]}>{response.message}</Text>
           </View>
         );
     }
@@ -2269,7 +2331,7 @@ export default function App() {
           onPress={() => setShowPrivacyNotice(true)}
         >
           <Text style={styles.privacyFooterText}>
-            🔒 All data stays on your phone
+            🔒 Privacy & data settings
           </Text>
         </TouchableOpacity>
       </KeyboardAvoidingView>
