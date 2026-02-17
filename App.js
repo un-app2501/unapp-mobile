@@ -18,6 +18,7 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { captureIntent } from './captureIntent';
+import { getCoreMLPrediction } from './coremlPredictor';
 import { runSecureMigration } from './secureStorage';
 import { StatusBar } from 'expo-status-bar';
 import { WebView } from 'react-native-webview';
@@ -1157,6 +1158,11 @@ export default function App() {
           // Will trigger Swiggy/Zomato if connected
         }
       }
+    }
+    // CoreML prediction (v0.3)
+    const prediction = await getCoreMLPrediction();
+    if (prediction.shouldShow) {
+      console.log(`[un-app] CoreML suggests: ${prediction.cardType} (${(prediction.confidence*100).toFixed(0)}%)`);
     }
   };
 
