@@ -17,6 +17,8 @@ import {
   Alert,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { captureIntent } from './captureIntent';
+import { runSecureMigration } from './secureStorage';
 import { StatusBar } from 'expo-status-bar';
 import { WebView } from 'react-native-webview';
 import * as Calendar from 'expo-calendar';
@@ -241,6 +243,79 @@ const MCP_ENDPOINTS = {
 // v0.3: MCP GATEWAY (our Cloudflare Worker)
 // ============================================
 const MCP_GATEWAY_URL = 'https://unapp-mcp-gateway.connectswapnil.workers.dev';
+const ROUTE_PAIRS = {
+  'mumbai': ['pune', 'goa', 'nashik', 'lonavala', 'surat', 'ahmedabad'],
+  'pune': ['mumbai', 'goa', 'nashik', 'lonavala'],
+  'delhi': ['jaipur', 'chandigarh', 'lucknow', 'shimla'],
+  'bangalore': ['mysore', 'chennai', 'hyderabad'],
+  'chennai': ['pondicherry', 'bangalore'],
+  'hyderabad': ['bangalore'],
+  'ahmedabad': ['vadodara', 'mumbai', 'surat'],
+  'kolkata': ['lucknow'],
+};
+
+const CITY_ALIASES = {
+  'mum': 'mumbai', 'bombay': 'mumbai', 'bom': 'mumbai',
+  'pun': 'pune', 'puna': 'pune',
+  'del': 'delhi', 'dilli': 'delhi',
+  'jai': 'jaipur',
+  'blr': 'bangalore', 'bengaluru': 'bangalore', 'bang': 'bangalore',
+  'mys': 'mysore', 'mysuru': 'mysore',
+  'che': 'chennai', 'madras': 'chennai',
+  'pondy': 'pondicherry', 'puducherry': 'pondicherry',
+  'ahm': 'ahmedabad', 'amd': 'ahmedabad',
+  'vad': 'vadodara', 'baroda': 'vadodara',
+  'hyd': 'hyderabad',
+  'lon': 'lonavala', 'lonav': 'lonavala',
+  'nas': 'nashik', 'nasik': 'nashik',
+  'cal': 'kolkata', 'calcutta': 'kolkata',
+  'lko': 'lucknow', 'chd': 'chandigarh', 'sim': 'shimla', 'sur': 'surat',
+};
+function detectRouteIntent(input) {
+  const clean = input.toLowerCase()
+    .replace(/\b(to|se|from|via|road|highway|expressway|route|traffic|how is|hows|how's|what's|whats)\b/g, '')
+    .replace(/[^a-z\s]/g, '')
+    .trim()
+    .split(/\s+/)
+    .filter(w => w.length > 1);
+
+  if (clean.length < 2) return null;
+
+  const ALL_CITIES = new Set(Object.keys(ROUTE_PAIRS));
+  for (const dests of Object.values(ROUTE_PAIRS)) {
+    for (const d of dests) ALL_CITIES.add(d);
+  }
+
+  const cities = [];
+  for (const word of clean) {
+    const resolved = CITY_ALIASES[word] || (ALL_CITIES.has(word) ? word : null);
+    if (resolved && !cities.includes(resolved)) {
+      cities.push(resolved);
+    }
+  }
+
+  if (cities.length < 2) return null;
+
+  const [origin, dest] = cities;
+  if (ROUTE_PAIRS[origin] && ROUTE_PAIRS[origin].includes(dest)) {
+    return { origin, destination: dest };
+  }
+  if (ROUTE_PAIRS[dest] && ROUTE_PAIRS[dest].includes(origin)) {
+    return { origin: dest, destination: origin };
+  }
+  return null;
+}
+
+async function fetchRouteStatus(origin, destination) {
+  try {
+    const res = await fetch(`${MCP_GATEWAY_URL}/route-status?origin=${origin}&destination=${destination}`);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (e) {
+    console.log('Route fetch failed:', e);
+    return null;
+  }
+}
 
 // ============================================
 // NSE STOCKS API (FREE - NO AUTH NEEDED)
@@ -461,6 +536,7 @@ export default function App() {
   useEffect(() => {
     if (dataConsentGiven) {
       trackEvent('app_started', { source: 'ios_app' });
+      runSecureMigration();
       checkAndPreloadData();
     }
   }, [dataConsentGiven]);
@@ -1190,7 +1266,29 @@ export default function App() {
     
     try {
       let result;
-      
+      // Route status check (mumbai pune, del jai, etc.)
+      const routeIntent = detectRouteIntent(query);
+      if (routeIntent) {
+        const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
+        const data = await fetchRouteStatus(routeIntent.origin, routeIntent.destination);
+        if (data && !data.error) {
+          result = {
+            type: 'route',
+            title: `${cap(data.route.origin)} → ${cap(data.route.destination)}`,
+            highway: data.route.highway,
+            distance: `${data.route.distance_km} km`,
+            toll: data.route.toll,
+            driveTime: `${data.drive_time_min || data.route.typical_drive_min} min`,
+            status: data.status,
+            summary: data.summary,
+            confidence: data.confidence,
+            sourcesChecked: data.sources_checked,
+          };
+          setResponse(result);
+          setLoading(false);
+          return;
+        }
+      }
       switch (queryType) {
         case 'stocks':
           // Check if pre-loaded
@@ -1233,6 +1331,7 @@ export default function App() {
             type: 'general',
             message: `un-app is built around your daily patterns. Try asking about:\n\n📈 Stocks — "How's the market?"\n🍕 Food — "I'm hungry"\n📅 Calendar — "What's my schedule?"\n🏏 Cricket — "Live scores"\n🚕 Cab — "Book a ride"\n\nThe more you use it, the smarter it gets.`,
           };
+          captureIntent(query.trim());
       }
       
       setResponse(result);
@@ -1740,7 +1839,38 @@ export default function App() {
             )}
           </View>
         );
-        
+        case 'route':
+        const statusColors = { clear: '#22C55E', likely_clear: '#22C55E', delayed: '#F59E0B', heavy: '#EF4444', unknown: '#888' };
+        const statusLabels = { clear: 'CLEAR', likely_clear: 'LIKELY CLEAR', delayed: 'DELAYS', heavy: 'HEAVY', unknown: 'CHECKING' };
+        const rColor = statusColors[response.status] || '#888';
+        return (
+          <View style={[styles.responseCard, { borderLeftWidth: 4, borderLeftColor: rColor }]}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <Text style={styles.responseTitle}>{response.title}</Text>
+              <View style={{ backgroundColor: rColor + '22', paddingHorizontal: 10, paddingVertical: 3, borderRadius: 12 }}>
+                <Text style={{ color: rColor, fontSize: 11, fontWeight: '700' }}>{statusLabels[response.status] || 'CHECKING'}</Text>
+              </View>
+            </View>
+            <Text style={{ color: '#E5E5E5', fontSize: 14, lineHeight: 20, marginBottom: 10 }}>{response.summary}</Text>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 }}>
+              <View style={{ alignItems: 'center', flex: 1 }}>
+                <Text style={{ color: '#A3E635', fontSize: 18, fontWeight: '700' }}>{response.driveTime}</Text>
+                <Text style={{ color: '#888', fontSize: 10, marginTop: 2 }}>DRIVE</Text>
+              </View>
+              <View style={{ alignItems: 'center', flex: 1 }}>
+                <Text style={{ color: '#FFF', fontSize: 14, fontWeight: '600' }}>{response.distance}</Text>
+                <Text style={{ color: '#888', fontSize: 10, marginTop: 2 }}>DISTANCE</Text>
+              </View>
+              <View style={{ alignItems: 'center', flex: 1 }}>
+                <Text style={{ color: '#FFF', fontSize: 14, fontWeight: '600' }}>{response.toll}</Text>
+                <Text style={{ color: '#888', fontSize: 10, marginTop: 2 }}>TOLL</Text>
+              </View>
+            </View>
+            <View style={{ borderTopWidth: 1, borderTopColor: '#333', paddingTop: 6 }}>
+              <Text style={{ color: '#666', fontSize: 10 }}>via {response.highway} • Polled from {response.sourcesChecked} source{response.sourcesChecked !== 1 ? 's' : ''} • {response.confidence} confidence</Text>
+            </View>
+          </View>
+        );
       case 'food':
         if (response.needsConnection) {
           return (

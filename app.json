@@ -15,8 +15,14 @@
       "**/*"
     ],
     "plugins": [
-      ["expo-location", {"locationWhenInUsePermission": "un-app uses your location to show nearby restaurants and calculate cab fares."}],
-      "expo-calendar"
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "un-app uses your location to show nearby restaurants and calculate cab fares."
+        }
+      ],
+      "expo-calendar",
+      "expo-secure-store"
     ],
     "ios": {
       "supportsTablet": false,
