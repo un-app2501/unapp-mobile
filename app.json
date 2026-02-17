@@ -22,8 +22,7 @@
         }
       ],
       "expo-calendar",
-      "expo-secure-store",
-      "./modules/unapp-coreml"
+      "expo-secure-store"
     ],
     "ios": {
       "supportsTablet": false,
