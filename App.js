@@ -26,12 +26,7 @@ import * as Calendar from 'expo-calendar';
 import * as Location from 'expo-location';
 
 // Native modules (only available in EAS builds, not Expo Go)
-let UnAppCoreML = null;
-try {
-  UnAppCoreML = require('./modules/unapp-coreml');
-} catch (e) {
-  console.log('[un-app] CoreML module not available (Expo Go)');
-}
+
 
 let Notifications = null;
 try {
@@ -823,43 +818,10 @@ export default function App() {
       }
       
       // v0.3: CoreML on-device prediction (EAS build only)
-      if (UnAppCoreML && UnAppCoreML.isModelLoaded()) {
-        try {
-          const patternCounts = {};
-          for (const [cat, data] of Object.entries(patterns)) {
-            patternCounts[cat] = data.count || 0;
-          }
-          const features = await UnAppCoreML.buildFeatures(patternCounts);
-          const prediction = await UnAppCoreML.predict(features);
-          trackEvent('coreml_prediction', { 
-            predicted: prediction.prediction, 
-            confidence: prediction.confidence.toFixed(2) 
-          });
-        } catch (e) {
-          console.log('[CoreML] Prediction error:', e);
-        }
-      }
+      
       
       // v0.3: Sync widget data via App Groups
-      if (UnAppCoreML) {
-        try {
-          const widgetCards = cards.slice(0, 3).map(c => ({
-            emoji: c.emoji,
-            title: c.title,
-            subtitle: c.subtitle || '',
-            action: c.action,
-          }));
-          await UnAppCoreML.updateWidgetData({
-            prediction: 'none',
-            confidence: 0,
-            greeting: getGreeting(),
-            cards: widgetCards,
-            lastUpdated: new Date().toISOString(),
-          });
-        } catch (e) {
-          console.log('[Widget] Data sync error:', e);
-        }
-      }
+      
     })();
   };
 
