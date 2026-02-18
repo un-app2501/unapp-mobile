@@ -2,7 +2,7 @@
   "expo": {
     "name": "un-app",
     "slug": "unapp",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -27,7 +27,7 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "ai.unapp.mobile",
-      "buildNumber": "7",
+      "buildNumber": "9",
       "infoPlist": {
         "NSCameraUsageDescription": "un-app does not use your camera",
         "NSCalendarsUsageDescription": "un-app learns WHEN you're busy to predict your needs better",
