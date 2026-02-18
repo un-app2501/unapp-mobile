@@ -17,9 +17,23 @@ import {
   Alert,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { captureIntent } from './captureIntent';
+import { getCoreMLPrediction } from './coremlPredictor';
+import { runSecureMigration } from './secureStorage';
 import { StatusBar } from 'expo-status-bar';
 import { WebView } from 'react-native-webview';
 import * as Calendar from 'expo-calendar';
+import * as Location from 'expo-location';
+
+// Native modules (only available in EAS builds, not Expo Go)
+
+
+let Notifications = null;
+try {
+  Notifications = require('expo-notifications');
+} catch (e) {
+  console.log('[un-app] Notifications module not available');
+}
 
 // ============================================
 // v0.2 NEW: CRICKET API (cricketdata.org)
@@ -27,7 +41,7 @@ import * as Calendar from 'expo-calendar';
 // ============================================
 // 🔑 REPLACE THIS WITH YOUR ACTUAL KEY
 // ============================================
-const ANTHROPIC_API_KEY = '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';
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
 
 const CRICKET_API_KEY = '865feb36-5923-4661-bb07-adb19c69f648'; // Free tier: https://cricketdata.org
 const fetchCricketScores = async () => {
@@ -202,6 +216,11 @@ const STORAGE_KEYS = {
   calendarPattern: 'unapp_calendar_pattern',
   sharePattern: 'unapp_share_pattern',
   shareItems: 'unapp_share_items',
+  // v0.3 new keys
+  mcpCache: 'unapp_mcp_cache',
+  cuisinePreference: 'unapp_cuisine_preference',
+  lastCabEstimate: 'unapp_last_cab_estimate',
+  lastFoodCompare: 'unapp_last_food_compare',
 };
 
 // ============================================
@@ -215,6 +234,84 @@ const MCP_ENDPOINTS = {
   },
   zomato: 'https://mcp-server.zomato.com/mcp',
 };
+
+// ============================================
+// v0.3: MCP GATEWAY (our Cloudflare Worker)
+// ============================================
+const MCP_GATEWAY_URL = 'https://unapp-mcp-gateway.connectswapnil.workers.dev';
+const ROUTE_PAIRS = {
+  'mumbai': ['pune', 'goa', 'nashik', 'lonavala', 'surat', 'ahmedabad'],
+  'pune': ['mumbai', 'goa', 'nashik', 'lonavala'],
+  'delhi': ['jaipur', 'chandigarh', 'lucknow', 'shimla'],
+  'bangalore': ['mysore', 'chennai', 'hyderabad'],
+  'chennai': ['pondicherry', 'bangalore'],
+  'hyderabad': ['bangalore'],
+  'ahmedabad': ['vadodara', 'mumbai', 'surat'],
+  'kolkata': ['lucknow'],
+};
+
+const CITY_ALIASES = {
+  'mum': 'mumbai', 'bombay': 'mumbai', 'bom': 'mumbai',
+  'pun': 'pune', 'puna': 'pune',
+  'del': 'delhi', 'dilli': 'delhi',
+  'jai': 'jaipur',
+  'blr': 'bangalore', 'bengaluru': 'bangalore', 'bang': 'bangalore',
+  'mys': 'mysore', 'mysuru': 'mysore',
+  'che': 'chennai', 'madras': 'chennai',
+  'pondy': 'pondicherry', 'puducherry': 'pondicherry',
+  'ahm': 'ahmedabad', 'amd': 'ahmedabad',
+  'vad': 'vadodara', 'baroda': 'vadodara',
+  'hyd': 'hyderabad',
+  'lon': 'lonavala', 'lonav': 'lonavala',
+  'nas': 'nashik', 'nasik': 'nashik',
+  'cal': 'kolkata', 'calcutta': 'kolkata',
+  'lko': 'lucknow', 'chd': 'chandigarh', 'sim': 'shimla', 'sur': 'surat',
+};
+function detectRouteIntent(input) {
+  const clean = input.toLowerCase()
+    .replace(/\b(to|se|from|via|road|highway|expressway|route|traffic|how is|hows|how's|what's|whats)\b/g, '')
+    .replace(/[^a-z\s]/g, '')
+    .trim()
+    .split(/\s+/)
+    .filter(w => w.length > 1);
+
+  if (clean.length < 2) return null;
+
+  const ALL_CITIES = new Set(Object.keys(ROUTE_PAIRS));
+  for (const dests of Object.values(ROUTE_PAIRS)) {
+    for (const d of dests) ALL_CITIES.add(d);
+  }
+
+  const cities = [];
+  for (const word of clean) {
+    const resolved = CITY_ALIASES[word] || (ALL_CITIES.has(word) ? word : null);
+    if (resolved && !cities.includes(resolved)) {
+      cities.push(resolved);
+    }
+  }
+
+  if (cities.length < 2) return null;
+
+  const [origin, dest] = cities;
+  if (ROUTE_PAIRS[origin] && ROUTE_PAIRS[origin].includes(dest)) {
+    return { origin, destination: dest };
+  }
+  if (ROUTE_PAIRS[dest] && ROUTE_PAIRS[dest].includes(origin)) {
+    return { origin: dest, destination: origin };
+  }
+  return null;
+}
+
+async function fetchRouteStatus(origin, destination) {
+  try {
+    const res = await fetch(`${MCP_GATEWAY_URL}/route-status?origin=${origin}&destination=${destination}`);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (e) {
+    console.log('Route fetch failed:', e);
+    return null;
+  }
+}
 
 // ============================================
 // NSE STOCKS API (FREE - NO AUTH NEEDED)
@@ -289,6 +386,42 @@ const fetchNSEStocks = async (symbol = null, market = 'india') => {
 // ============================================
 // MCP CLIENT (JSON-RPC 2.0)
 // ============================================
+
+// ============================================
+// v0.3: MCP GATEWAY FETCH FUNCTIONS
+// ============================================
+const fetchCabEstimate = async (pickupLat, pickupLng, dropoffLat, dropoffLng) => {
+  try {
+    const res = await fetch(`${MCP_GATEWAY_URL}/mcp/cab-estimate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pickup_lat: pickupLat, pickup_lng: pickupLng, dropoff_lat: dropoffLat, dropoff_lng: dropoffLng }),
+    });
+    if (!res.ok) throw new Error(`Gateway ${res.status}`);
+    return await res.json();
+  } catch (e) {
+    console.log('MCP cab estimate error:', e);
+    return null;
+  }
+};
+
+const fetchFoodCompare = async (lat, lng, cuisinePreference = null) => {
+  try {
+    const body = { lat, lng };
+    if (cuisinePreference) body.cuisine_preference = cuisinePreference;
+    const res = await fetch(`${MCP_GATEWAY_URL}/mcp/food-compare`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`Gateway ${res.status}`);
+    return await res.json();
+  } catch (e) {
+    console.log('MCP food compare error:', e);
+    return null;
+  }
+};
+
 class MCPClient {
   constructor(endpoint, token = null) {
     this.endpoint = endpoint;
@@ -370,6 +503,7 @@ export default function App() {
   const [lastStockCheck, setLastStockCheck] = useState(null);
   const [weeklyInsight, setWeeklyInsight] = useState(null);
   const [dismissedCategories, setDismissedCategories] = useState(new Set());
+  const [userLocation, setUserLocation] = useState(null);
   const currentPredictionRef = useRef(null);
   
   const scrollViewRef = useRef(null);
@@ -398,12 +532,83 @@ export default function App() {
   useEffect(() => {
     if (dataConsentGiven) {
       trackEvent('app_started', { source: 'ios_app' });
+      runSecureMigration();
       checkAndPreloadData();
     }
   }, [dataConsentGiven]);
 
   const initializeApp = async () => {
     await loadStoredData();
+  };
+
+  // Fetch device GPS location
+  const fetchUserLocation = async () => {
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        console.log('Location permission denied');
+        return;
+      }
+      const loc = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.High,
+      });
+      const coords = { lat: loc.coords.latitude, lng: loc.coords.longitude };
+      setUserLocation(coords);
+      await AsyncStorage.setItem('@unapp_user_location', JSON.stringify(coords));
+      trackEvent('location_fetched', { lat: coords.lat.toFixed(2), lng: coords.lng.toFixed(2) });
+    } catch (e) {
+      // Fallback: try cached location
+      try {
+        const cached = await AsyncStorage.getItem('@unapp_user_location');
+        if (cached) setUserLocation(JSON.parse(cached));
+      } catch (ce) {}
+    }
+  };
+
+  // Fetch location after consent
+  useEffect(() => {
+    if (dataConsentGiven) {
+      fetchUserLocation();
+      registerForSilentNotifications();
+    }
+  }, [dataConsentGiven]);
+
+  // v0.3: Register for silent push notifications (background refresh)
+  const registerForSilentNotifications = async () => {
+    if (!Notifications) return;
+    try {
+      const { status } = await Notifications.requestPermissionsAsync();
+      if (status !== 'granted') {
+        console.log('[Notifications] Permission denied');
+        return;
+      }
+      
+      // Get push token for future server-triggered refreshes
+      const token = await Notifications.getExpoPushTokenAsync({
+        projectId: '23f6341c-bc7d-4e3d-8b9a-d3c6d3f1234a',
+      });
+      
+      // Store token for analytics
+      try {
+        await AsyncStorage.setItem('@unapp_push_token', token.data);
+        trackEvent('push_token_registered', { token_prefix: token.data.substring(0, 20) });
+      } catch (e) {}
+      
+      // Handle background notification — triggers context refresh
+      Notifications.setNotificationHandler({
+        handleNotification: async (notification) => {
+          const data = notification.request.content.data;
+          if (data?.type === 'silent_refresh') {
+            // Re-generate context cards in background
+            generateContextCards();
+            return { shouldShowAlert: false, shouldPlaySound: false, shouldSetBadge: false };
+          }
+          return { shouldShowAlert: true, shouldPlaySound: false, shouldSetBadge: false };
+        },
+      });
+    } catch (e) {
+      console.log('[Notifications] Setup error:', e);
+    }
   };
 
   // Trigger weekly insight when patterns are ready AND consent given
@@ -570,7 +775,7 @@ export default function App() {
       const asyncCards = [];
       
       // Cricket: show card if there are live matches
-      if (!dismissedCategories.has('cricket')) {
+      if (!dismissedCategories.has('cricket') && !addedCategories.has('cricket')) {
         try {
           const cricketResult = await fetchCricketScores();
           const liveMatches = (cricketResult.data || []).filter(m => m.status === 'live');
@@ -605,8 +810,18 @@ export default function App() {
       }
       
       if (asyncCards.length > 0) {
-        setContextCards(prev => [...prev, ...asyncCards.filter(c => !dismissedCategories.has(c.category))]);
+        setContextCards(prev => {
+          const existingCategories = new Set(prev.map(c => c.category));
+          const newCards = asyncCards.filter(c => !dismissedCategories.has(c.category) && !existingCategories.has(c.category));
+          return [...prev, ...newCards];
+        });
       }
+      
+      // v0.3: CoreML on-device prediction (EAS build only)
+      
+      
+      // v0.3: Sync widget data via App Groups
+      
     })();
   };
 
@@ -906,6 +1121,11 @@ export default function App() {
         }
       }
     }
+    // CoreML prediction (v0.3)
+    const prediction = await getCoreMLPrediction();
+    if (prediction.shouldShow) {
+      console.log(`[un-app] CoreML suggests: ${prediction.cardType} (${(prediction.confidence*100).toFixed(0)}%)`);
+    }
   };
 
   // ============================================
@@ -1014,7 +1234,29 @@ export default function App() {
     
     try {
       let result;
-      
+      // Route status check (mumbai pune, del jai, etc.)
+      const routeIntent = detectRouteIntent(query);
+      if (routeIntent) {
+        const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
+        const data = await fetchRouteStatus(routeIntent.origin, routeIntent.destination);
+        if (data && !data.error) {
+          result = {
+            type: 'route',
+            title: `${cap(data.route.origin)} → ${cap(data.route.destination)}`,
+            highway: data.route.highway,
+            distance: `${data.route.distance_km} km`,
+            toll: data.route.toll,
+            driveTime: `${data.drive_time_min || data.route.typical_drive_min} min`,
+            status: data.status,
+            summary: data.summary,
+            confidence: data.confidence,
+            sourcesChecked: data.sources_checked,
+          };
+          setResponse(result);
+          setLoading(false);
+          return;
+        }
+      }
       switch (queryType) {
         case 'stocks':
           // Check if pre-loaded
@@ -1057,13 +1299,17 @@ export default function App() {
             type: 'general',
             message: `un-app is built around your daily patterns. Try asking about:\n\n📈 Stocks — "How's the market?"\n🍕 Food — "I'm hungry"\n📅 Calendar — "What's my schedule?"\n🏏 Cricket — "Live scores"\n🚕 Cab — "Book a ride"\n\nThe more you use it, the smarter it gets.`,
           };
+          captureIntent(query.trim());
       }
       
       setResponse(result);
       
       // Bug fix 1: Remove contextual cards for this category and prevent regeneration
-      if (result?.type && ['stocks', 'food', 'cab', 'calendar', 'eventkit_calendar', 'cricket'].includes(result.type)) {
-        const dismissType = result.type === 'eventkit_calendar' ? 'calendar' : result.type;
+      if (result?.type && ['stocks', 'food', 'food_compare', 'cab', 'cab_compare', 'calendar', 'eventkit_calendar', 'cricket'].includes(result.type)) {
+        const dismissType = result.type === 'eventkit_calendar' ? 'calendar' 
+          : result.type === 'cab_compare' ? 'cab'
+          : result.type === 'food_compare' ? 'food'
+          : result.type;
         setDismissedCategories(prev => new Set([...prev, dismissType]));
         setContextCards(prev => prev.filter(c => c.category !== dismissType));
       }
@@ -1096,10 +1342,9 @@ export default function App() {
   };
 
   // ============================================
-  // FOOD QUERY (SWIGGY/ZOMATO MCP)
+  // FOOD QUERY (v0.3: MCP GATEWAY FOR COMPARISON)
   // ============================================
   const handleFoodQuery = async () => {
-    // Check if Swiggy or Zomato is connected
     const isSwiggyConnected = connectedServices.swiggy;
     const isZomatoConnected = connectedServices.zomato;
     
@@ -1112,33 +1357,56 @@ export default function App() {
       };
     }
     
-    // Check if user mentioned specific service
     const queryLower = query.toLowerCase();
     const wantsSwiggy = queryLower.includes('swiggy');
     const wantsZomato = queryLower.includes('zomato');
     
-    // If specific service mentioned, open that one
+    // If specific service mentioned, open that one directly
     if (wantsSwiggy && isSwiggyConnected) {
-      return {
-        type: 'food',
-        connected: true,
-        source: 'Swiggy',
-        message: 'Open Swiggy to order',
-        deepLink: 'swiggy://',
-      };
+      return { type: 'food', connected: true, source: 'Swiggy', message: 'Open Swiggy to order', deepLink: 'swiggy://' };
     }
-    
     if (wantsZomato && isZomatoConnected) {
-      return {
-        type: 'food',
-        connected: true,
-        source: 'Zomato',
-        message: 'Open Zomato to order',
-        deepLink: 'zomato://',
-      };
+      return { type: 'food', connected: true, source: 'Zomato', message: 'Open Zomato to order', deepLink: 'zomato://' };
     }
     
-    // Show both options
+    // v0.3: Try MCP gateway for Swiggy vs Zomato comparison
+    if (isSwiggyConnected || isZomatoConnected) {
+      try {
+        // Load cuisine preference
+        let cuisinePref = null;
+        try {
+          cuisinePref = await AsyncStorage.getItem(STORAGE_KEYS.cuisinePreference);
+        } catch (e) {}
+        
+        // Use device GPS, fallback to Mumbai center
+        const location = userLocation || { lat: 19.076, lng: 72.8777 };
+        
+        const comparison = await fetchFoodCompare(location.lat, location.lng, cuisinePref);
+        
+        if (comparison && comparison.platforms) {
+          const fetchedAt = Date.now();
+          try {
+            await AsyncStorage.setItem(STORAGE_KEYS.lastFoodCompare, JSON.stringify({ ...comparison, fetchedAt }));
+          } catch (e) {}
+          
+          trackEvent('mcp_fetch', { service: 'food', cache_hit: false });
+          
+          return {
+            type: 'food_compare',
+            connected: true,
+            comparison,
+            fetchedAt,
+            swiggyConnected: isSwiggyConnected,
+            zomatoConnected: isZomatoConnected,
+            message: 'Restaurant comparison',
+          };
+        }
+      } catch (e) {
+        console.log('MCP food fetch failed, falling back:', e);
+      }
+    }
+    
+    // Fallback: show both options (v0.2 behavior)
     return {
       type: 'food',
       connected: true,
@@ -1147,53 +1415,6 @@ export default function App() {
       zomatoConnected: isZomatoConnected,
       message: 'Choose where to order',
     };
-    
-    // Connected! Show confirmation for now
-    return {
-      type: 'food',
-      connected: true,
-      source: isSwiggyConnected ? 'Swiggy' : 'Zomato',
-      message: 'Ready to order! Full integration coming soon.',
-    };
-    
-    // Try Swiggy first
-    if (swiggyToken) {
-      const client = new MCPClient(MCP_ENDPOINTS.swiggy.food, swiggyToken);
-      const result = await client.callTool('search_restaurants', {
-        query: query,
-      });
-      
-      if (result.needsAuth) {
-        // Token expired, need to re-auth
-        await AsyncStorage.removeItem(STORAGE_KEYS.swiggyToken);
-        return handleFoodQuery();
-      }
-      
-      return {
-        type: 'food',
-        source: 'swiggy',
-        data: result,
-      };
-    }
-    
-    // Try Zomato
-    if (zomatoToken) {
-      const client = new MCPClient(MCP_ENDPOINTS.zomato, zomatoToken);
-      const result = await client.callTool('search_restaurants', {
-        query: query,
-      });
-      
-      if (result.needsAuth) {
-        await AsyncStorage.removeItem(STORAGE_KEYS.zomatoToken);
-        return handleFoodQuery();
-      }
-      
-      return {
-        type: 'food',
-        source: 'zomato',
-        data: result,
-      };
-    }
   };
 
   // ============================================
@@ -1241,7 +1462,7 @@ export default function App() {
   };
 
   // ============================================
-  // CAB QUERY (NAMMA YATRI / UBER / OLA / RAPIDO)
+  // CAB QUERY (v0.3: MCP GATEWAY FOR LIVE PRICING)
   // ============================================
   const handleCabQuery = async () => {
     const isNammaConnected = connectedServices.nammaYatri;
@@ -1267,14 +1488,51 @@ export default function App() {
     if (wantsNamma && isNammaConnected) {
       return { type: 'cab', connected: true, source: 'Namma Yatri', message: 'Open Namma Yatri', deepLink: 'nammayatri://' };
     }
+    if (wantsRapido && isRapidoConnected) {
+      return { type: 'cab', connected: true, source: 'Rapido', message: 'Open Rapido', deepLink: 'rapido://' };
+    }
+
+    // v0.3: Try MCP gateway for live pricing
+    if (isUberConnected || isOlaConnected || isRapidoConnected) {
+      try {
+        // Use device GPS for pickup, offset ~5km for dropoff estimate
+        // CoreML will predict actual destination later
+        const pickup = userLocation || { lat: 19.076, lng: 72.8777 };
+        const dropoff = { lat: pickup.lat + 0.035, lng: pickup.lng + 0.025 };
+        
+        const estimate = await fetchCabEstimate(pickup.lat, pickup.lng, dropoff.lat, dropoff.lng);
+        
+        if (estimate && estimate.providers) {
+          const fetchedAt = Date.now();
+          // Cache it
+          try {
+            await AsyncStorage.setItem(STORAGE_KEYS.lastCabEstimate, JSON.stringify({ ...estimate, fetchedAt }));
+          } catch (e) {}
+          
+          trackEvent('mcp_fetch', { service: 'cab', cache_hit: false });
+          
+          return {
+            type: 'cab_compare',
+            connected: true,
+            estimate,
+            fetchedAt,
+            uberConnected: isUberConnected,
+            olaConnected: isOlaConnected,
+            rapidoConnected: isRapidoConnected,
+            message: 'Live cab pricing',
+          };
+        }
+      } catch (e) {
+        console.log('MCP cab fetch failed, falling back:', e);
+      }
+    }
+    
+    // Fallback: show all connected services (v0.2 behavior)
     if (wantsUber && isUberConnected) {
       return { type: 'cab', connected: true, source: 'Uber', message: 'Open Uber', deepLink: 'uber://' };
     }
     if (wantsOla && isOlaConnected) {
       return { type: 'cab', connected: true, source: 'Ola', message: 'Open Ola', deepLink: 'olacabs://' };
-    }
-    if (wantsRapido && isRapidoConnected) {
-      return { type: 'cab', connected: true, source: 'Rapido', message: 'Open Rapido', deepLink: 'rapido://' };
     }
     
     return {
@@ -1549,7 +1807,38 @@ export default function App() {
             )}
           </View>
         );
-        
+        case 'route':
+        const statusColors = { clear: '#22C55E', likely_clear: '#22C55E', delayed: '#F59E0B', heavy: '#EF4444', unknown: '#888' };
+        const statusLabels = { clear: 'CLEAR', likely_clear: 'LIKELY CLEAR', delayed: 'DELAYS', heavy: 'HEAVY', unknown: 'CHECKING' };
+        const rColor = statusColors[response.status] || '#888';
+        return (
+          <View style={[styles.responseCard, { borderLeftWidth: 4, borderLeftColor: rColor }]}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <Text style={styles.responseTitle}>{response.title}</Text>
+              <View style={{ backgroundColor: rColor + '22', paddingHorizontal: 10, paddingVertical: 3, borderRadius: 12 }}>
+                <Text style={{ color: rColor, fontSize: 11, fontWeight: '700' }}>{statusLabels[response.status] || 'CHECKING'}</Text>
+              </View>
+            </View>
+            <Text style={{ color: '#E5E5E5', fontSize: 14, lineHeight: 20, marginBottom: 10 }}>{response.summary}</Text>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 }}>
+              <View style={{ alignItems: 'center', flex: 1 }}>
+                <Text style={{ color: '#A3E635', fontSize: 18, fontWeight: '700' }}>{response.driveTime}</Text>
+                <Text style={{ color: '#888', fontSize: 10, marginTop: 2 }}>DRIVE</Text>
+              </View>
+              <View style={{ alignItems: 'center', flex: 1 }}>
+                <Text style={{ color: '#FFF', fontSize: 14, fontWeight: '600' }}>{response.distance}</Text>
+                <Text style={{ color: '#888', fontSize: 10, marginTop: 2 }}>DISTANCE</Text>
+              </View>
+              <View style={{ alignItems: 'center', flex: 1 }}>
+                <Text style={{ color: '#FFF', fontSize: 14, fontWeight: '600' }}>{response.toll}</Text>
+                <Text style={{ color: '#888', fontSize: 10, marginTop: 2 }}>TOLL</Text>
+              </View>
+            </View>
+            <View style={{ borderTopWidth: 1, borderTopColor: '#333', paddingTop: 6 }}>
+              <Text style={{ color: '#666', fontSize: 10 }}>via {response.highway} • Polled from {response.sourcesChecked} source{response.sourcesChecked !== 1 ? 's' : ''} • {response.confidence} confidence</Text>
+            </View>
+          </View>
+        );
       case 'food':
         if (response.needsConnection) {
           return (
@@ -1826,6 +2115,279 @@ export default function App() {
             </TouchableOpacity>
           </View>
         );
+
+      // ============================================
+      // v0.3: CAB COMPARISON CARD (Uber vs Ola)
+      // ============================================
+      case 'cab_compare': {
+        const est = response.estimate;
+        const uberData = est?.providers?.uber;
+        const olaData = est?.providers?.ola;
+        const rapidoData = est?.providers?.rapido;
+        const ageMinutes = response.fetchedAt ? Math.round((Date.now() - response.fetchedAt) / 60000) : 0;
+
+        return (
+          <View style={styles.responseCard}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Text style={styles.responseTitle}>🚕 Cab Pricing</Text>
+              <TouchableOpacity 
+                onPress={async () => {
+                  setLoading(true);
+                  const result = await handleCabQuery();
+                  setResponse(result);
+                  setLoading(false);
+                  trackEvent('card_refresh_tap', { card_type: 'cab' });
+                }}
+              >
+                <Text style={{ fontSize: 12, color: THEME.lime }}>↻ Refresh</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={{ fontSize: 11, color: THEME.lightGray, marginBottom: 12 }}>
+              Updated {ageMinutes < 1 ? 'just now' : `${ageMinutes} min ago`}
+            </Text>
+
+            {/* Uber */}
+            {uberData && (
+              <TouchableOpacity 
+                style={[styles.compareRow, response.uberConnected && styles.compareRowActive]}
+                onPress={() => {
+                  if (uberData.deeplink) {
+                    trackEvent('card_comparison_tap', { card_type: 'cab', chosen: 'uber' });
+                    openWithFallback(uberData.deeplink, 'https://m.uber.com');
+                  }
+                }}
+              >
+                <Text style={styles.compareProvider}>Uber</Text>
+                <View style={{ flex: 1 }}>
+                  {uberData.rides && uberData.rides.length > 0 ? uberData.rides.slice(0, 2).map((ride, i) => (
+                    <View key={i} style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 2 }}>
+                      <Text style={{ fontSize: 13, color: THEME.white }}>{ride.type}</Text>
+                      <View style={{ flexDirection: 'row', gap: 10 }}>
+                        <Text style={{ fontSize: 13, color: THEME.lime, fontWeight: '600' }}>{ride.fare_estimate}</Text>
+                        {ride.eta_minutes && <Text style={{ fontSize: 12, color: THEME.lightGray }}>{ride.eta_minutes} min</Text>}
+                        {ride.surge && <Text style={{ fontSize: 11, color: '#ff4444' }}>⚡{ride.surge}x</Text>}
+                      </View>
+                    </View>
+                  )) : (
+                    <Text style={{ fontSize: 13, color: THEME.lightGray }}>{uberData.note || 'Tap to open Uber'}</Text>
+                  )}
+                </View>
+              </TouchableOpacity>
+            )}
+
+            {/* Ola */}
+            {olaData && (
+              <TouchableOpacity 
+                style={[styles.compareRow, response.olaConnected && styles.compareRowActive]}
+                onPress={() => {
+                  if (olaData.deeplink) {
+                    trackEvent('card_comparison_tap', { card_type: 'cab', chosen: 'ola' });
+                    openWithFallback(olaData.deeplink, 'https://www.olacabs.com');
+                  }
+                }}
+              >
+                <Text style={styles.compareProvider}>Ola</Text>
+                <View style={{ flex: 1 }}>
+                  {olaData.rides && olaData.rides.length > 0 ? olaData.rides.slice(0, 2).map((ride, i) => (
+                    <View key={i} style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 2 }}>
+                      <Text style={{ fontSize: 13, color: THEME.white }}>{ride.type}</Text>
+                      <View style={{ flexDirection: 'row', gap: 10 }}>
+                        <Text style={{ fontSize: 13, color: THEME.lime, fontWeight: '600' }}>{ride.fare_estimate}</Text>
+                        {ride.eta_minutes && <Text style={{ fontSize: 12, color: THEME.lightGray }}>{ride.eta_minutes} min</Text>}
+                      </View>
+                    </View>
+                  )) : (
+                    <Text style={{ fontSize: 13, color: THEME.lightGray }}>{olaData.note || 'Tap to open Ola'}</Text>
+                  )}
+                </View>
+              </TouchableOpacity>
+            )}
+
+            {/* Fallback if all failed */}
+            {(!uberData || uberData.available === false) && (!olaData || olaData.available === false) && (!rapidoData || rapidoData.available === false) && (
+              <Text style={{ fontSize: 13, color: THEME.lightGray, textAlign: 'center', marginTop: 8 }}>
+                Live pricing unavailable. Tap to open your ride app.
+              </Text>
+            )}
+
+            {/* Rapido */}
+            {rapidoData && (
+              <TouchableOpacity 
+                style={[styles.compareRow, response.rapidoConnected && styles.compareRowActive]}
+                onPress={() => {
+                  if (rapidoData.deeplink) {
+                    trackEvent('card_comparison_tap', { card_type: 'cab', chosen: 'rapido' });
+                    openWithFallback(rapidoData.deeplink, 'https://www.rapido.bike');
+                  }
+                }}
+              >
+                <Text style={styles.compareProvider}>Rapido</Text>
+                <View style={{ flex: 1 }}>
+                  {rapidoData.rides && rapidoData.rides.length > 0 ? rapidoData.rides.slice(0, 2).map((ride, i) => (
+                    <View key={i} style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 2 }}>
+                      <Text style={{ fontSize: 13, color: THEME.white }}>{ride.type}</Text>
+                      <View style={{ flexDirection: 'row', gap: 10 }}>
+                        <Text style={{ fontSize: 13, color: THEME.lime, fontWeight: '600' }}>{ride.fare_estimate}</Text>
+                        {ride.eta_minutes && <Text style={{ fontSize: 12, color: THEME.lightGray }}>{ride.eta_minutes} min</Text>}
+                        {ride.surge && <Text style={{ fontSize: 11, color: '#ff4444' }}>⚡{ride.surge}x</Text>}
+                      </View>
+                    </View>
+                  )) : (
+                    <Text style={{ fontSize: 13, color: THEME.lightGray }}>{rapidoData.note || 'Tap to open Rapido'}</Text>
+                  )}
+                </View>
+              </TouchableOpacity>
+            )}
+
+            {/* Distance + time summary */}
+            {est?.distance_km && (
+              <Text style={{ fontSize: 11, color: THEME.lightGray, textAlign: 'center', marginTop: 6 }}>
+                ~{est.distance_km} km • ~{est.duration_min} min • Estimates may vary
+              </Text>
+            )}
+          </View>
+        );
+      }
+
+      // ============================================
+      // v0.3: FOOD COMPARISON CARD (Swiggy vs Zomato)
+      // ============================================
+      case 'food_compare': {
+        const comp = response.comparison;
+        const swiggy = comp?.platforms?.swiggy;
+        const zomato = comp?.platforms?.zomato;
+        const ageMinutes = response.fetchedAt ? Math.round((Date.now() - response.fetchedAt) / 60000) : 0;
+
+        return (
+          <View style={styles.responseCard}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Text style={styles.responseTitle}>🍛 Restaurants</Text>
+              <TouchableOpacity 
+                onPress={async () => {
+                  setLoading(true);
+                  const result = await handleFoodQuery();
+                  setResponse(result);
+                  setLoading(false);
+                  trackEvent('card_refresh_tap', { card_type: 'food' });
+                }}
+              >
+                <Text style={{ fontSize: 12, color: THEME.lime }}>↻ Refresh</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={{ fontSize: 11, color: THEME.lightGray, marginBottom: 12 }}>
+              Updated {ageMinutes < 1 ? 'just now' : `${ageMinutes} min ago`}
+            </Text>
+
+            {/* Cross-platform comparison */}
+            {comp?.comparison && comp.comparison.length > 0 && (
+              <View style={{ marginBottom: 12 }}>
+                <Text style={{ fontSize: 12, color: THEME.lime, fontWeight: '600', marginBottom: 8 }}>Same restaurant, both platforms:</Text>
+                {comp.comparison.slice(0, 3).map((item, i) => (
+                  <View key={i} style={[styles.compareRow, { flexDirection: 'column', alignItems: 'stretch' }]}>
+                    <Text style={{ fontSize: 14, color: THEME.white, fontWeight: '600', marginBottom: 6 }}>{item.restaurant}</Text>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                      <TouchableOpacity 
+                        style={{ flex: 1, marginRight: 6 }}
+                        onPress={() => {
+                          trackEvent('card_comparison_tap', { card_type: 'food', chosen: 'swiggy' });
+                          Linking.openURL('swiggy://');
+                        }}
+                      >
+                        <Text style={{ fontSize: 11, color: THEME.lightGray }}>Swiggy</Text>
+                        <Text style={{ fontSize: 13, color: THEME.white }}>{item.swiggy.delivery_time || '—'}</Text>
+                        {item.swiggy.offers && <Text style={{ fontSize: 11, color: THEME.lime }}>{item.swiggy.offers}</Text>}
+                      </TouchableOpacity>
+                      <TouchableOpacity 
+                        style={{ flex: 1, marginLeft: 6 }}
+                        onPress={() => {
+                          trackEvent('card_comparison_tap', { card_type: 'food', chosen: 'zomato' });
+                          Linking.openURL('zomato://');
+                        }}
+                      >
+                        <Text style={{ fontSize: 11, color: THEME.lightGray }}>Zomato</Text>
+                        <Text style={{ fontSize: 13, color: THEME.white }}>{item.zomato.delivery_time || '—'}</Text>
+                        {item.zomato.offers && <Text style={{ fontSize: 11, color: THEME.lime }}>{item.zomato.offers}</Text>}
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            )}
+
+            {/* Swiggy top restaurants */}
+            {swiggy?.restaurants && swiggy.restaurants.length > 0 && (
+              <View style={styles.compareRow}>
+                <Text style={styles.compareProvider}>Swiggy</Text>
+                <View style={{ flex: 1 }}>
+                  {swiggy.restaurants.slice(0, 3).map((r, i) => (
+                    <TouchableOpacity 
+                      key={i} 
+                      style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6, paddingVertical: 3 }}
+                      onPress={() => {
+                        trackEvent('card_restaurant_tap', { platform: 'swiggy', restaurant: r.name });
+                        Linking.openURL(r.deeplink || 'swiggy://');
+                      }}
+                    >
+                      <Text style={{ fontSize: 13, color: THEME.white, flex: 1 }} numberOfLines={1}>{r.name}</Text>
+                      <View style={{ flexDirection: 'row', gap: 8 }}>
+                        {r.rating && <Text style={{ fontSize: 12, color: THEME.lime }}>★ {r.rating}</Text>}
+                        {r.delivery_time_display && <Text style={{ fontSize: 12, color: THEME.lightGray }}>{r.delivery_time_display}</Text>}
+                      </View>
+                    </TouchableOpacity>
+                  ))}
+                  {swiggy.restaurants[0]?.offers && (
+                    <Text style={{ fontSize: 11, color: THEME.lime, marginTop: 2 }}>{swiggy.restaurants[0].offers}</Text>
+                  )}
+                </View>
+              </View>
+            )}
+
+            {/* Zomato top restaurants */}
+            {zomato?.restaurants && zomato.restaurants.length > 0 && (
+              <View style={styles.compareRow}>
+                <Text style={styles.compareProvider}>Zomato</Text>
+                <View style={{ flex: 1 }}>
+                  {zomato.restaurants.slice(0, 3).map((r, i) => (
+                    <TouchableOpacity 
+                      key={i} 
+                      style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6, paddingVertical: 3 }}
+                      onPress={() => {
+                        trackEvent('card_restaurant_tap', { platform: 'zomato', restaurant: r.name });
+                        Linking.openURL(r.deeplink || 'zomato://');
+                      }}
+                    >
+                      <Text style={{ fontSize: 13, color: THEME.white, flex: 1 }} numberOfLines={1}>{r.name}</Text>
+                      <View style={{ flexDirection: 'row', gap: 8 }}>
+                        {r.rating && <Text style={{ fontSize: 12, color: THEME.lime }}>★ {r.rating}</Text>}
+                        {r.delivery_time_display && <Text style={{ fontSize: 12, color: THEME.lightGray }}>{r.delivery_time_display}</Text>}
+                      </View>
+                    </TouchableOpacity>
+                  ))}
+                  {zomato.restaurants[0]?.offers && (
+                    <Text style={{ fontSize: 11, color: THEME.lime, marginTop: 2 }}>{zomato.restaurants[0].offers}</Text>
+                  )}
+                </View>
+              </View>
+            )}
+
+            {/* Fallback */}
+            {(!swiggy?.restaurants || swiggy.restaurants.length === 0) && (!zomato?.restaurants || zomato.restaurants.length === 0) && (
+              <View style={styles.connectButtons}>
+                {response.swiggyConnected && (
+                  <TouchableOpacity style={styles.connectButton} onPress={() => Linking.openURL('swiggy://')}>
+                    <Text style={styles.connectButtonText}>Open Swiggy</Text>
+                  </TouchableOpacity>
+                )}
+                {response.zomatoConnected && (
+                  <TouchableOpacity style={styles.connectButton} onPress={() => Linking.openURL('zomato://')}>
+                    <Text style={styles.connectButtonText}>Open Zomato</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            )}
+          </View>
+        );
+      }
         
       default:
         return (
@@ -1879,10 +2441,18 @@ export default function App() {
     if (hour >= 5 && hour < 9) {
       return stockPattern ? 'Market opens soon' : 'Good morning';
     } else if (hour >= 9 && hour < 12) {
-      return stockPattern ? 'Market is open' : 'Good morning';
+      const d = new Date().getDay();
+      const isWeekday = d >= 1 && d <= 5;
+      return (stockPattern && isWeekday) ? 'Market is open' : 'Good morning';
     } else if (hour >= 12 && hour < 14) {
       return foodPattern ? 'Lunch time?' : 'Good afternoon';
-    } else if (hour >= 14 && hour < 17) {
+    } else if (hour >= 14 && hour < 16) {
+      const d = new Date().getDay();
+      const m = new Date().getMinutes();
+      const isWeekday = d >= 1 && d <= 5;
+      const beforeClose = (hour * 60 + m) <= 930;
+      return (stockPattern && isWeekday && beforeClose) ? 'Market is open' : 'Good afternoon';
+    } else if (hour >= 16 && hour < 17) {
       return 'Good afternoon';
     } else if (hour >= 17 && hour < 21) {
       return foodPattern ? 'Dinner time?' : 'Good evening';
@@ -2243,7 +2813,14 @@ export default function App() {
           )}
           
           {/* Pre-loaded suggestion */}
-          {preloadedData?.stocks && (
+          {preloadedData?.stocks && (() => {
+            const h = new Date().getHours();
+            const m = new Date().getMinutes();
+            const d = new Date().getDay();
+            const t = h * 60 + m;
+            const isMarket = d >= 1 && d <= 5 && t >= 555 && t <= 930;
+            return isMarket;
+          })() && (
             <TouchableOpacity
               style={styles.preloadCard}
               onPress={() => {
@@ -2921,5 +3498,27 @@ const styles = StyleSheet.create({
     marginTop: 6,
     paddingHorizontal: 10,
     lineHeight: 20,
+  },
+
+  // v0.3: Comparison cards
+  compareRow: {
+    backgroundColor: THEME.mediumGray,
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 8,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+  },
+  compareRowActive: {
+    borderWidth: 1,
+    borderColor: THEME.lime,
+  },
+  compareProvider: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: THEME.lime,
+    width: 50,
+    marginTop: 2,
   },
 });
