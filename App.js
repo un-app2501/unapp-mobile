@@ -376,19 +376,39 @@ const fetchNSEStocks = async (symbol = null, market = 'india') => {
       if (data.chart && data.chart.result && data.chart.result[0]) {
         const quote = data.chart.result[0];
         const meta = quote.meta;
-        const price = meta.regularMarketPrice || meta.previousClose || 0;
-        const prevClose = meta.previousClose || price || 1;
-        const change = price - prevClose;
-        const changePercent = prevClose ? (change / prevClose) * 100 : 0;
+        const price = meta.regularMarketPrice || 0;
+        // Use chartPreviousClose (more reliable than previousClose for change calculation)
+        const prevClose = meta.chartPreviousClose || meta.previousClose || 0;
+        
+        // If price is 0 or same as prevClose, try getting from actual chart data
+        let actualPrice = price;
+        if ((!actualPrice || actualPrice === prevClose) && quote.indicators?.quote?.[0]) {
+          const closes = quote.indicators.quote[0].close;
+          if (closes && closes.length > 0) {
+            // Get last non-null close price
+            for (let ci = closes.length - 1; ci >= 0; ci--) {
+              if (closes[ci] !== null) {
+                actualPrice = closes[ci];
+                break;
+              }
+            }
+          }
+        }
+        
+        const change = prevClose > 0 ? actualPrice - prevClose : 0;
+        const changePercent = prevClose > 0 ? (change / prevClose) * 100 : 0;
         
         const nameMap = {
           '^NSEI': 'NIFTY 50', '^BSESN': 'SENSEX',
           '^IXIC': 'NASDAQ', '^DJI': 'DOW JONES', '^GSPC': 'S&P 500',
         };
         
+        // Clean display: "TCS.NS" → "TCS", "RELIANCE.NS" → "RELIANCE"
+        const displayName = nameMap[sym] || sym.replace('.NS', '').replace('.BO', '');
+        
         results.push({
-          symbol: nameMap[sym] || sym,
-          price: price.toFixed(2),
+          symbol: displayName,
+          price: actualPrice.toFixed(2),
           change: change.toFixed(2),
           changePercent: changePercent.toFixed(2),
           isUp: change >= 0,
@@ -439,20 +459,48 @@ const STOCK_SYMBOL_MAP = {
   'titan': 'TITAN.NS', 'ultratech': 'ULTRACEMCO.NS', 'nestle': 'NESTLEIND.NS',
   'power grid': 'POWERGRID.NS', 'ntpc': 'NTPC.NS', 'ongc': 'ONGC.NS', 'coal india': 'COALINDIA.NS',
   'hindalco': 'HINDALCO.NS', 'jswsteel': 'JSWSTEEL.NS', 'jsw steel': 'JSWSTEEL.NS',
-  'zomato': 'ZOMATO.NS', 'paytm': 'PAYTM.NS', 'dmart': 'DMART.NS',
-  'figma': 'FIGM', // not listed but user asked
+  'zomato stock': 'ZOMATO.NS', 'paytm': 'PAYTM.NS', 'dmart': 'DMART.NS',
+  // Mid-cap / small-cap commonly searched
+  'sterlite': 'STLTECH.NS', 'sterlitetech': 'STLTECH.NS', 'stl': 'STLTECH.NS',
+  'vedanta': 'VEDL.NS', 'vedl': 'VEDL.NS', 'jsw energy': 'JSWENERGY.NS',
+  'irctc': 'IRCTC.NS', 'irfc': 'IRFC.NS', 'rvnl': 'RVNL.NS',
+  'motherson': 'MOTHERSON.NS', 'indigo': 'INDIGO.NS', 'interglobe': 'INDIGO.NS',
+  'pidilite': 'PIDILITIND.NS', 'havells': 'HAVELLS.NS', 'dabur': 'DABUR.NS',
+  'godrej': 'GODREJCP.NS', 'britannia': 'BRITANNIA.NS', 'marico': 'MARICO.NS',
+  'dl': 'DLF.NS', 'dlf': 'DLF.NS', 'cipla': 'CIPLA.NS', 'divis': 'DIVISLAB.NS',
+  'siemens': 'SIEMENS.NS', 'abb': 'ABB.NS', 'hal': 'HAL.NS',
+  'bel': 'BEL.NS', 'bhel': 'BHEL.NS', 'sail': 'SAIL.NS',
+  'idea': 'IDEA.NS', 'vi': 'IDEA.NS', 'vodafone': 'IDEA.NS',
+  'trent': 'TRENT.NS', 'zydus': 'ZYDUSLIFE.NS', 'srf': 'SRF.NS',
+  'dixon': 'DIXON.NS', 'polycab': 'POLYCAB.NS', 'persistent': 'PERSISTENT.NS',
+  'coforge': 'COFORGE.NS', 'mphasis': 'MPHASIS.NS', 'ltim': 'LTIM.NS',
+  'ltimindtree': 'LTIM.NS', 'tech mahindra': 'TECHM.NS', 'techm': 'TECHM.NS',
   // Mutual fund keywords → show index
   'mutual fund': null, 'mf': null, 'sip': null,
 };
 
 const detectIndividualStock = (queryText) => {
   const low = queryText.toLowerCase().trim();
-  for (const [keyword, symbol] of Object.entries(STOCK_SYMBOL_MAP)) {
+  const words = low.split(/\s+/);
+  
+  // First: try multi-word matches (longer phrases first to avoid partial matches)
+  const multiWordKeys = Object.keys(STOCK_SYMBOL_MAP).filter(k => k.includes(' '));
+  for (const keyword of multiWordKeys) {
     if (low.includes(keyword)) {
-      return { keyword, symbol };
+      return { keyword, symbol: STOCK_SYMBOL_MAP[keyword] };
     }
   }
-  // Try matching "XYZ stock" or "XYZ share" pattern
+  
+  // Second: try single-word matches — must be EXACT word match, not substring
+  const singleWordKeys = Object.keys(STOCK_SYMBOL_MAP).filter(k => !k.includes(' '));
+  for (const keyword of singleWordKeys) {
+    // Word must match exactly (not as substring of another word)
+    if (words.includes(keyword)) {
+      return { keyword, symbol: STOCK_SYMBOL_MAP[keyword] };
+    }
+  }
+  
+  // Third: try "XYZ stock" or "XYZ share" pattern
   const match = low.match(/^(\w+)\s+(stock|share|price|nse|bse)$/);
   if (match) {
     const sym = `${match[1].toUpperCase()}.NS`;
@@ -959,6 +1007,7 @@ export default function App() {
             },
             calendar: { emoji: '📅', title: 'Check schedule?', action: 'check_calendar' },
             cricket: { emoji: '🏏', title: 'Check cricket?', action: 'check_cricket' },
+            weather: { emoji: '🌤️', title: 'Check weather?', action: 'check_weather' },
           };
           
           const config = cardConfig[category];
@@ -1092,6 +1141,14 @@ export default function App() {
           if (log.length > 200) log.length = 200;
           await AsyncStorage.setItem(STORAGE_KEYS.cricketCheckLog, JSON.stringify(log));
         } catch (e) {}
+        setLoading(false);
+        break;
+      case 'check_weather':
+        setLoading(true);
+        const wLoc = userLocation || { lat: 19.076, lng: 72.8777 };
+        const weatherResult = await fetchWeather(wLoc.lat, wLoc.lng);
+        setResponse(weatherResult);
+        await updatePatterns('weather');
         setLoading(false);
         break;
     }
@@ -1349,62 +1406,79 @@ export default function App() {
       return 'onboarding';
     }
     
-    // Stocks
-    if (lowered.includes('stock') || lowered.includes('sensex') || 
-        lowered.includes('nifty') || lowered.includes('market') ||
-        lowered.includes('share') || lowered.includes('nasdaq') ||
-        lowered.includes('dow') || lowered.includes('s&p') ||
-        lowered.includes('us market') || lowered.includes('reliance') ||
-        lowered.includes('hdfc') || lowered.includes('mutual fund') ||
-        lowered.includes('groww') || lowered.includes('zerodha')) {
-      return 'stocks';
-    }
+    // === ORDER MATTERS: most specific first, broadest last ===
     
-    // Food — UX 11: "zomato" maps to food, not general
-    if (lowered.includes('food') || lowered.includes('hungry') ||
-        lowered.includes('eat') || lowered.includes('swiggy') ||
-        lowered.includes('zomato') || lowered.includes('order') ||
-        lowered.includes('biryani') || lowered.includes('pizza') ||
-        lowered.includes('dinner') || lowered.includes('lunch') ||
-        lowered.includes('restaurant') || lowered.includes('deliver')) {
-      return 'food';
-    }
-    
-    // Calendar
-    if (lowered.includes('calendar') || lowered.includes('meeting') ||
-        lowered.includes('schedule') || lowered.includes('event') ||
-        lowered.includes('today') || lowered.includes('tomorrow')) {
-      return 'calendar';
-    }
-    
-    // Cricket (legacy support)
-    if (lowered.includes('cricket') || lowered.includes('score') ||
-        lowered.includes('ipl') || lowered.includes('match')) {
-      return 'cricket';
-    }
-    
-    // Cab
-    if (lowered.includes('cab') || lowered.includes('ride') ||
-        lowered.includes('uber') || lowered.includes('ola') ||
-        lowered.includes('namma') || lowered.includes('yatri') ||
-        lowered.includes('rapido') || lowered.includes('bike') ||
-        lowered.includes('taxi') || lowered.includes('auto') ||
-        lowered.includes('commute') || lowered.includes('office') ||
-        lowered.includes('home') || lowered.includes('drop')) {
-      return 'cab';
-    }
-    
-    // Weather (new category — v0.4)
-    if (lowered.includes('weather') || lowered.includes('rain') ||
-        lowered.includes('temperature') || lowered.includes('climate')) {
+    // 1. WEATHER — check FIRST (before food, to avoid "eat" in "weather")
+    //    Includes Hindi: barish, mausam, thand, thandi, garmi, sardi, dhoop
+    //    Includes misspellings: temprature, tempreature
+    if (lowered.includes('weather') || lowered.includes('temperature') || 
+        lowered.includes('temprature') || lowered.includes('tempreature') ||
+        lowered.includes('barish') || lowered.includes('baarish') || lowered.includes('mausam') ||
+        lowered.includes('thand') || lowered.includes('thandi') ||
+        lowered.includes('garmi') || lowered.includes('sardi') || lowered.includes('dhoop') ||
+        /\b(rain|rainy|sunny|cloudy|humidity|forecast|temp)\b/.test(lowered) ||
+        /will it rain|how('?s| is) (it |the )?(outside|climate)/.test(lowered)) {
       return 'weather';
     }
     
-    // YouTube/Media (new category — v0.4)
-    if (lowered.includes('youtube') || lowered.includes('song') ||
-        lowered.includes('music') || lowered.includes('video') ||
-        lowered.includes('spotify') || lowered.includes('netflix') ||
-        lowered.includes('watch')) {
+    // 2. SPECIFIC APP NAMES — route to their category before anything else
+    //    "swiggy" = food, "zomato" = food, "uber" = cab, etc.
+    //    This prevents "zomato" from matching stock symbol map
+    if (lowered.includes('swiggy') || lowered.includes('zomato')) return 'food';
+    if (lowered.includes('uber') || lowered.includes('ola') || 
+        lowered.includes('rapido') || lowered.includes('namma') || lowered.includes('yatri')) return 'cab';
+    
+    // 3. STOCKS — keywords and individual stock names
+    const stockKeywords = [
+      'stock', 'sensex', 'nifty', 'market', 'share price', 'nasdaq', 'dow', 's&p', 'us market',
+      'mutual fund', 'mf', 'sip', 'groww', 'zerodha',
+    ];
+    if (stockKeywords.some(k => lowered.includes(k))) return 'stocks';
+    if (detectIndividualStock(text)) return 'stocks';
+    
+    // 4. CRICKET
+    if (lowered.includes('cricket') || lowered.includes('ipl') ||
+        /\b(score|match)\b/.test(lowered)) {
+      return 'cricket';
+    }
+    
+    // 5. CALENDAR
+    //    "today" and "tomorrow" are ambiguous — "today lunch" should be food, not calendar
+    //    Only use today/tomorrow for calendar if no other category word is present
+    if (lowered.includes('calendar') || lowered.includes('meeting') ||
+        lowered.includes('schedule')) {
+      return 'calendar';
+    }
+    if ((lowered.includes('today') || lowered.includes('tomorrow') || lowered.includes('event')) &&
+        !(/\b(food|hungry|lunch|dinner|eat|khana|cab|ride|uber|ola|taxi|stock|market|nifty|sensex|cricket|ipl|match|score|weather|rain|play|watch|song)\b/.test(lowered))) {
+      return 'calendar';
+    }
+    
+    // 6. CAB (generic keywords — specific app names already caught above)
+    //    "drop" only in cab context: "drop me", "drop to [place]"
+    //    "auto" uses word boundary to avoid "automatic"
+    if (lowered.includes('cab') || lowered.includes('ride') ||
+        lowered.includes('bike taxi') || lowered.includes('taxi') || 
+        lowered.includes('commute') || /\bauto\b/.test(lowered) ||
+        /\bdrop\s+(me|to|at|home|office)\b/.test(lowered)) {
+      return 'cab';
+    }
+    
+    // 7. FOOD (generic keywords — swiggy/zomato already caught above)
+    //    NOTE: "eat" uses word boundary to avoid matching "create", "beat", "great", "theater"
+    if (lowered.includes('food') || lowered.includes('hungry') ||
+        lowered.includes('biryani') || lowered.includes('pizza') ||
+        lowered.includes('dinner') || lowered.includes('lunch') ||
+        lowered.includes('restaurant') || lowered.includes('deliver') ||
+        lowered.includes('order food') || lowered.includes('khana') ||
+        /\b(eat|eating|kha|khane)\b/.test(lowered)) {
+      return 'food';
+    }
+    
+    // 8. MEDIA / CONTENT — detect intent via trigger words
+    //    "play X", "watch X", "X song", "X trailer", "X highlights"
+    if (/\b(play|watch|listen|song|songs|video|movie|show|series|podcast|trailer|highlights|episode|scene|interview|chalisa|bhajan|aarti|qawwali)\b/.test(lowered) ||
+        lowered.includes('youtube')) {
       return 'media';
     }
     
@@ -1524,7 +1598,15 @@ export default function App() {
           break;
           
         case 'food':
-          result = await handleFoodQuery();
+          // If user typed a specific food app name, open it directly
+          const foodLow = query.toLowerCase();
+          if (foodLow.includes('swiggy')) {
+            result = { type: 'food', connected: true, source: 'Swiggy', message: 'Open Swiggy', deepLink: 'swiggy://', webUrl: 'https://www.swiggy.com' };
+          } else if (foodLow.includes('zomato')) {
+            result = { type: 'food', connected: true, source: 'Zomato', message: 'Open Zomato', deepLink: 'zomato://', webUrl: 'https://www.zomato.com' };
+          } else {
+            result = await handleFoodQuery();
+          }
           break;
           
         case 'calendar':
@@ -1544,7 +1626,19 @@ export default function App() {
           break;
           
         case 'cab':
-          result = await handleCabQuery();
+          // If user typed a specific cab app name, open it directly
+          const cabLow = query.toLowerCase();
+          const directCab = cabLow.includes('uber') ? { name: 'Uber', scheme: 'uber://', web: 'https://m.uber.com' }
+            : cabLow.includes('ola') ? { name: 'Ola', scheme: 'olacabs://', web: 'https://www.olacabs.com' }
+            : cabLow.includes('rapido') ? { name: 'Rapido', scheme: 'rapido://', web: 'https://www.rapido.bike' }
+            : (cabLow.includes('namma') || cabLow.includes('yatri')) ? { name: 'Namma Yatri', scheme: 'nammayatri://', web: 'https://nammayatri.in' }
+            : null;
+          
+          if (directCab) {
+            result = { type: 'cab', connected: true, source: directCab.name, message: `Open ${directCab.name}`, deepLink: directCab.scheme, webUrl: directCab.web };
+          } else {
+            result = await handleCabQuery();
+          }
           break;
           
         default:
@@ -1552,36 +1646,87 @@ export default function App() {
           if (queryType === 'onboarding') {
             result = {
               type: 'general',
-              message: `Hey! 👋 I'm un-app — I learn what you need and when.\n\nTry typing:\n📈 "stocks" or "market"\n🍕 "food" or "hungry"\n🚕 "cab" or "uber"\n🏏 "cricket"\n📅 "calendar"\n\nThe more you use me, the better I get at showing you the right thing at the right time.`,
+              message: `Hey! 👋 I'm un-app — I learn what you need and when.\n\nTry typing:\n📈 "reliance" or "nifty"\n🍕 "hungry" or "swiggy"\n🚕 "uber" or "cab"\n🏏 "cricket"\n📅 "calendar"\n🌤️ "weather" or "barish"\n▶️ "play hanuman chalisa" or "arijit singh song"\n\nThe more you use me, the better I get.`,
             };
           } else if (queryType === 'weather') {
             // v0.4: Actual weather fetch
             const location = userLocation || { lat: 19.076, lng: 72.8777 };
-            // Extract city name from query if present
-            const cityMatch = query.toLowerCase().replace(/weather|rain|temperature|climate|in|how|is|the|like/g, '').trim();
+            // Extract city name: strip ALL weather trigger words (English + Hindi)
+            const cityMatch = query.toLowerCase()
+              .replace(/\b(weather|rain|rainy|sunny|cloudy|humidity|forecast|temperature|temprature|tempreature|temp|climate|barish|baarish|mausam|thand|thandi|garmi|sardi|dhoop|will|it|in|how|is|the|like|outside|what|kya|aaj|ka|ke|today|kal)\b/g, '')
+              .trim();
             result = await fetchWeather(location.lat, location.lng, cityMatch.length > 2 ? cityMatch : null);
             await updatePatterns('weather');
           } else if (queryType === 'media') {
-            // v0.4: Detect which media app user wants and open it
-            const lowQ = query.toLowerCase();
-            let targetApp = null;
-            if (lowQ.includes('spotify') || lowQ.includes('music') || lowQ.includes('song')) targetApp = 'spotify';
-            else if (lowQ.includes('netflix')) targetApp = 'netflix';
-            else if (lowQ.includes('prime')) targetApp = 'prime';
-            else if (lowQ.includes('hotstar')) targetApp = 'hotstar';
-            else if (lowQ.includes('jio')) targetApp = 'jiocinema';
-            else targetApp = 'youtube'; // default
+            // v0.4: All content → YouTube with search query
+            // Strip trigger words but keep the actual content
+            const contentQuery = query.replace(/\b(play|watch|listen|listen to|open|show me|on|search|find|songs? of|songs? by|video of|videos? of|youtube|on youtube|trailer of|highlights of)\b/gi, '').trim();
+            
+            const encoded = contentQuery.length > 1 ? encodeURIComponent(contentQuery) : '';
+            const searchScheme = encoded ? `youtube://results?search_query=${encoded}` : 'youtube://';
+            const searchWeb = encoded ? `https://www.youtube.com/results?search_query=${encoded}` : 'https://www.youtube.com';
             
             result = {
               type: 'media',
-              apps: targetApp ? [MEDIA_APPS[targetApp]] : Object.values(MEDIA_APPS).slice(0, 4),
-              targetApp,
-              message: targetApp ? `Open ${MEDIA_APPS[targetApp].name}` : 'Choose where to watch',
+              apps: [{ scheme: searchScheme, web: searchWeb, name: 'YouTube', emoji: '▶️' }],
+              targetApp: 'youtube',
+              contentQuery: contentQuery || null,
+              message: contentQuery && contentQuery.length > 1 
+                ? `▶️ "${contentQuery}" on YouTube` 
+                : 'Open YouTube',
             };
           } else {
+            // Before giving up, try as unknown stock ticker (single word, 2-15 chars, all letters)
+            // But skip common English words that are definitely NOT tickers
+            const trimmed = query.trim();
+            const COMMON_WORDS = new Set([
+              'the','and','for','are','but','not','you','all','can','had','her','was','one','our',
+              'out','has','his','how','its','may','new','now','old','see','way','who','did','get',
+              'got','let','say','she','too','use','yes','no','ok','hi','hey','hello','bye','thanks',
+              'thank','please','sorry','good','bad','nice','great','cool','fine','sure','well','just',
+              'like','what','when','where','why','how','this','that','with','from','will','have','been',
+              'more','some','than','them','then','they','time','very','your','about','could','after',
+              'make','much','also','back','only','come','made','find','here','know','take','want',
+              'give','most','help','test','create','done','next','best','open','close','start','stop',
+              'send','save','edit','read','work','name','home','page','app','data','info','news',
+            ]);
+            const looksLikeStock = /^[a-zA-Z]{2,15}$/i.test(trimmed) && !COMMON_WORDS.has(trimmed.toLowerCase());
+            if (looksLikeStock) {
+              try {
+                const trySymbol = `${trimmed.toUpperCase()}.NS`;
+                const tryResult = await fetchNSEStocks(trySymbol);
+                if (tryResult?.data?.length > 0 && tryResult.data[0].price !== '0.00') {
+                  // It's a valid stock! Show it with indices
+                  const indices = await fetchNSEStocks(null, 'india');
+                  result = { 
+                    type: 'stocks', 
+                    data: [...tryResult.data, ...(indices.data || [])], 
+                    timestamp: new Date().toLocaleTimeString() 
+                  };
+                  // Track as stocks
+                  await updatePatterns('stocks');
+                  setResponse(result);
+                  if (result?.data?.length > 0) await storeLastStockCheck(result);
+                  setLoading(false);
+                  return;
+                }
+              } catch (e) { /* not a stock, continue to fallback */ }
+            }
+            
+            // Smarter fallback: if query looks like a person/song name, suggest contextually
+            // Multi-word = person name → suggest play, NOT stock (no one checks "virat kohli stock")
+            // Single word = could be ticker → suggest both play and stock
+            const words = query.trim().split(/\s+/);
+            const looksLikeName = words.length <= 3 && words.every(w => /^[a-zA-Z]+$/.test(w));
+            const isMultiWord = words.length >= 2;
+            
             result = {
               type: 'general',
-              message: `I don't handle that yet, but I'm learning.\n\nTry:\n📈 "stocks" — market data\n🍕 "food" — restaurants nearby\n🚕 "cab" — book a ride\n🏏 "cricket" — live scores\n📅 "calendar" — your schedule`,
+              message: looksLikeName 
+                ? (isMultiWord
+                  ? `Looking for "${query.trim()}"?\n\n▶️ "play ${query.trim()}" → YouTube\n🏏 "${query.trim()} cricket" → scores\n\nOr try: food, cab, weather, calendar`
+                  : `Looking for "${query.trim()}"? Try:\n\n▶️ "play ${query.trim()}" → YouTube\n📈 "${query.trim()} stock" → stock price\n\nOr try: food, cab, cricket, weather, calendar`)
+                : `I don't handle that yet, but I'm learning.\n\nTry:\n📈 "tcs" or "nifty"\n🍕 "hungry" or "swiggy"\n🚕 "uber" or "cab"\n🏏 "cricket"\n📅 "calendar"\n🌤️ "weather"\n▶️ For music/video: "play [name]"`,
             };
             captureIntent(query.trim());
           }
@@ -1985,7 +2130,7 @@ export default function App() {
           {/* What we collect */}
           <Text style={{ fontSize: 16, fontWeight: '600', color: THEME.lime, marginBottom: 10 }}>What data we collect</Text>
           <Text style={{ fontSize: 14, color: '#ccc', lineHeight: 22, marginBottom: 24 }}>
-            {'• Calendar event metadata (titles, times, durations)\n• App usage patterns and timing signals\n• Device context (time of day, day of week)\n• Your interactions within un-app (queries, taps)'}
+            {'• App usage patterns and timing signals\n• Device context (time of day, day of week)\n• Coarse location (for weather and nearby services)\n• Calendar event metadata (titles, times, durations)\n• Your interactions within un-app (queries, taps)'}
           </Text>
 
           {/* Who we share with */}
@@ -2099,7 +2244,35 @@ export default function App() {
         const sinceCheck = getSinceLastCheck(response);
         return (
           <View style={styles.responseCard}>
-            <Text style={styles.responseTitle}>📈 Market Update</Text>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Text style={styles.responseTitle}>📈 Market Update</Text>
+              <TouchableOpacity 
+                onPress={async () => {
+                  setLoading(true);
+                  // Re-fetch whatever stocks were shown
+                  const individualStock = response.data?.find(s => !['NIFTY 50', 'SENSEX', 'NASDAQ', 'DOW JONES', 'S&P 500'].includes(s.symbol));
+                  let refreshed;
+                  if (individualStock) {
+                    const sym = `${individualStock.symbol}.NS`;
+                    const [indiv, indices] = await Promise.all([
+                      fetchNSEStocks(sym),
+                      fetchNSEStocks(null, 'india'),
+                    ]);
+                    refreshed = { type: 'stocks', data: [...(indiv.data || []), ...(indices.data || [])], timestamp: new Date().toLocaleTimeString() };
+                  } else {
+                    const isUS = response.data?.some(s => ['NASDAQ', 'DOW JONES', 'S&P 500'].includes(s.symbol));
+                    refreshed = await fetchNSEStocks(null, isUS ? 'us' : 'india');
+                  }
+                  setResponse(refreshed);
+                  if (refreshed?.data?.length > 0) await storeLastStockCheck(refreshed);
+                  trackEvent('card_refresh_tap', { card_type: 'stocks' });
+                  setLoading(false);
+                }}
+                style={{ padding: 6 }}
+              >
+                <Text style={{ fontSize: 14, color: THEME.lime }}>↻ Refresh</Text>
+              </TouchableOpacity>
+            </View>
             <Text style={styles.responseTime}>{response.timestamp}</Text>
             
             {sinceCheck && (
@@ -2254,7 +2427,7 @@ export default function App() {
               style={styles.connectButton}
               onPress={() => {
                 setResponse(null);
-                setTimeout(() => Linking.openURL(response.deepLink), 100);
+                setTimeout(() => openWithFallback(response.deepLink, response.webUrl || response.deepLink), 100);
               }}
             >
               <Text style={styles.connectButtonText}>Open {response.source}</Text>
@@ -2784,7 +2957,9 @@ export default function App() {
                     openWithFallback(app.scheme, app.web);
                   }}
                 >
-                  <Text style={styles.connectButtonText}>{app.emoji} Open {app.name}</Text>
+                  <Text style={styles.connectButtonText}>
+                    {response.contentQuery ? `▶️ Search "${response.contentQuery}"` : `${app.emoji} Open ${app.name}`}
+                  </Text>
                 </TouchableOpacity>
               ))}
             </View>
@@ -2937,6 +3112,11 @@ export default function App() {
         text: 'Check cricket?',
         action: () => handlePredictionTap('cricket'),
       },
+      weather: {
+        emoji: '🌤️',
+        text: 'Check weather?',
+        action: () => handlePredictionTap('weather'),
+      },
     };
     
     const p = predictions[prediction];
@@ -2973,6 +3153,10 @@ export default function App() {
         break;
       case 'cricket':
         result = await fetchCricketScores();
+        break;
+      case 'weather':
+        const loc = userLocation || { lat: 19.076, lng: 72.8777 };
+        result = await fetchWeather(loc.lat, loc.lng);
         break;
     }
     
@@ -3204,7 +3388,7 @@ export default function App() {
             <View style={styles.emptyState}>
               <Text style={styles.emptyEmoji}>👋</Text>
               <Text style={styles.emptyTitle}>Nothing yet</Text>
-              <Text style={styles.emptySub}>Use un-app a few days and it starts learning you. Try stocks, food, cab or calendar.</Text>
+              <Text style={styles.emptySub}>Type what you need — stocks, food, cab, weather, cricket or even a song name. The more you use it, the smarter it gets.</Text>
             </View>
           )}
           
@@ -3282,7 +3466,7 @@ export default function App() {
         <View style={styles.inputContainer}>
           <TextInput
             style={styles.input}
-            placeholder="try: cab, food, stocks, cricket"
+            placeholder="what do you need right now?"
             placeholderTextColor={THEME.lightGray}
             value={query}
             onChangeText={setQuery}
