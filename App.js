@@ -422,6 +422,140 @@ const fetchNSEStocks = async (symbol = null, market = 'india') => {
 };
 
 // ============================================
+// ============================================
+// v0.4: INDIVIDUAL STOCK SYMBOL MAP (Phase 3)
+// ============================================
+const STOCK_SYMBOL_MAP = {
+  'reliance': 'RELIANCE.NS', 'tcs': 'TCS.NS', 'infosys': 'INFY.NS', 'infy': 'INFY.NS',
+  'hdfc': 'HDFCBANK.NS', 'hdfc bank': 'HDFCBANK.NS', 'icici': 'ICICIBANK.NS', 'icici bank': 'ICICIBANK.NS',
+  'sbi': 'SBIN.NS', 'state bank': 'SBIN.NS', 'kotak': 'KOTAKBANK.NS', 'axis': 'AXISBANK.NS',
+  'wipro': 'WIPRO.NS', 'hcl': 'HCLTECH.NS', 'lt': 'LT.NS', 'larsen': 'LT.NS',
+  'bajaj': 'BAJFINANCE.NS', 'bajaj finance': 'BAJFINANCE.NS', 'bajaj auto': 'BAJAJ-AUTO.NS',
+  'maruti': 'MARUTI.NS', 'tata motors': 'TATAMOTORS.NS', 'tata': 'TATAMOTORS.NS',
+  'tata steel': 'TATASTEEL.NS', 'tata power': 'TATAPOWER.NS', 'tata consumer': 'TATACONSUM.NS',
+  'adani': 'ADANIENT.NS', 'adani ports': 'ADANIPORTS.NS', 'adani green': 'ADANIGREEN.NS',
+  'itc': 'ITC.NS', 'sunpharma': 'SUNPHARMA.NS', 'sun pharma': 'SUNPHARMA.NS',
+  'asian paints': 'ASIANPAINT.NS', 'bharti': 'BHARTIARTL.NS', 'airtel': 'BHARTIARTL.NS',
+  'titan': 'TITAN.NS', 'ultratech': 'ULTRACEMCO.NS', 'nestle': 'NESTLEIND.NS',
+  'power grid': 'POWERGRID.NS', 'ntpc': 'NTPC.NS', 'ongc': 'ONGC.NS', 'coal india': 'COALINDIA.NS',
+  'hindalco': 'HINDALCO.NS', 'jswsteel': 'JSWSTEEL.NS', 'jsw steel': 'JSWSTEEL.NS',
+  'zomato': 'ZOMATO.NS', 'paytm': 'PAYTM.NS', 'dmart': 'DMART.NS',
+  'figma': 'FIGM', // not listed but user asked
+  // Mutual fund keywords → show index
+  'mutual fund': null, 'mf': null, 'sip': null,
+};
+
+const detectIndividualStock = (queryText) => {
+  const low = queryText.toLowerCase().trim();
+  for (const [keyword, symbol] of Object.entries(STOCK_SYMBOL_MAP)) {
+    if (low.includes(keyword)) {
+      return { keyword, symbol };
+    }
+  }
+  // Try matching "XYZ stock" or "XYZ share" pattern
+  const match = low.match(/^(\w+)\s+(stock|share|price|nse|bse)$/);
+  if (match) {
+    const sym = `${match[1].toUpperCase()}.NS`;
+    return { keyword: match[1], symbol: sym };
+  }
+  return null;
+};
+
+// ============================================
+// v0.4: WEATHER (wttr.in — free, no API key)
+// ============================================
+const fetchWeather = async (lat, lng, cityName = null) => {
+  try {
+    const location = cityName || `${lat},${lng}`;
+    const res = await fetch(`https://wttr.in/${encodeURIComponent(location)}?format=j1`, {
+      headers: { 'User-Agent': 'un-app/0.4' },
+    });
+    if (!res.ok) throw new Error('Weather API unavailable');
+    const data = await res.json();
+    
+    const current = data.current_condition?.[0];
+    const area = data.nearest_area?.[0];
+    if (!current) throw new Error('No weather data');
+    
+    return {
+      type: 'weather',
+      city: area?.areaName?.[0]?.value || cityName || 'Your location',
+      temp: current.temp_C,
+      feelsLike: current.FeelsLikeC,
+      humidity: current.humidity,
+      description: current.weatherDesc?.[0]?.value || '',
+      windSpeed: current.windspeedKmph,
+      windDir: current.winddir16Point,
+      uvIndex: current.uvIndex,
+      visibility: current.visibility,
+      timestamp: new Date().toLocaleTimeString(),
+      forecast: (data.weather || []).slice(0, 3).map(d => ({
+        date: d.date,
+        maxTemp: d.maxtempC,
+        minTemp: d.mintempC,
+        description: d.hourly?.[4]?.weatherDesc?.[0]?.value || '',
+      })),
+    };
+  } catch (e) {
+    console.log('Weather fetch error:', e);
+    return { type: 'weather', error: 'Could not fetch weather. Check your connection.' };
+  }
+};
+
+// ============================================
+// v0.4: MEDIA DEEPLINKS (YouTube, Spotify, Netflix)
+// ============================================
+const MEDIA_APPS = {
+  youtube: { scheme: 'youtube://', web: 'https://www.youtube.com', name: 'YouTube', emoji: '▶️' },
+  spotify: { scheme: 'spotify://', web: 'https://open.spotify.com', name: 'Spotify', emoji: '🎵' },
+  netflix: { scheme: 'netflix://', web: 'https://www.netflix.com', name: 'Netflix', emoji: '🎬' },
+  prime: { scheme: 'aiv://', web: 'https://www.primevideo.com', name: 'Prime Video', emoji: '📺' },
+  hotstar: { scheme: 'hotstar://', web: 'https://www.hotstar.com', name: 'Hotstar', emoji: '⭐' },
+  jiocinema: { scheme: 'jiocinema://', web: 'https://www.jiocinema.com', name: 'JioCinema', emoji: '🎞️' },
+};
+
+// ============================================
+// v0.4: DAILY ANALYTICS SNAPSHOT (Phase 4)
+// ============================================
+const pushDailySnapshot = async (patterns, appOpens, tapsSaved, predictionAccuracy, queryHistory) => {
+  try {
+    const today = new Date().toISOString().split('T')[0];
+    const lastSnap = await AsyncStorage.getItem('unapp_last_snapshot_date');
+    if (lastSnap === today) return; // Already pushed today
+    
+    const snapshot = {
+      date: today,
+      app_opens: appOpens,
+      taps_saved: tapsSaved,
+      prediction_accuracy_correct: predictionAccuracy.correct,
+      prediction_accuracy_total: predictionAccuracy.total,
+      total_queries: queryHistory.length,
+      pattern_count: Object.keys(patterns).length,
+      patterns_summary: JSON.stringify(
+        Object.fromEntries(
+          Object.entries(patterns).map(([k, v]) => [k, { count: v.count, peakHour: v.times?.length > 0 ? Math.round(v.times.reduce((a,b) => a+b, 0) / v.times.length) : null }])
+        )
+      ),
+    };
+    
+    await fetch(`${SUPABASE_URL}/rest/v1/daily_snapshots`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': SUPABASE_ANON_KEY,
+        'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+        'Prefer': 'return=minimal',
+      },
+      body: JSON.stringify(snapshot),
+    });
+    
+    await AsyncStorage.setItem('unapp_last_snapshot_date', today);
+    console.log('[analytics] Daily snapshot pushed for', today);
+  } catch (e) {
+    console.log('[analytics] Snapshot push failed:', e.message);
+  }
+};
+
 // MCP CLIENT (JSON-RPC 2.0)
 // ============================================
 
@@ -596,6 +730,8 @@ export default function App() {
       trackEvent('app_started', { source: 'ios_app' });
       runSecureMigration();
       checkAndPreloadData();
+      // v0.4 Phase 4: Push daily analytics snapshot
+      pushDailySnapshot(patterns, appOpens, tapsSaved, predictionAccuracy, queryHistory);
     }
   }, [dataConsentGiven]);
 
@@ -980,7 +1116,7 @@ export default function App() {
         try {
           const parsed = JSON.parse(storedPatterns);
           // Clean invalid pattern keys + remove general/cricket
-          const validCategories = ['stocks', 'food', 'cab', 'calendar', 'cricket'];
+          const validCategories = ['stocks', 'food', 'cab', 'calendar', 'cricket', 'weather', 'media'];
           const cleaned = {};
           for (const key of Object.keys(parsed)) {
             if (validCategories.includes(key) && parsed[key].count >= 1) {
@@ -1362,7 +1498,28 @@ export default function App() {
           } else {
             const lowQ = query.toLowerCase();
             const isUS = lowQ.includes('nasdaq') || lowQ.includes('dow') || lowQ.includes('s&p') || lowQ.includes('us market');
-            result = await fetchNSEStocks(null, isUS ? 'us' : 'india');
+            
+            // v0.4: Check for individual stock
+            const individualStock = detectIndividualStock(query);
+            if (individualStock && individualStock.symbol) {
+              // Fetch individual stock + indices together
+              const [individual, indices] = await Promise.all([
+                fetchNSEStocks(individualStock.symbol),
+                fetchNSEStocks(null, 'india'),
+              ]);
+              // Merge: individual stock on top, then indices
+              const allData = [
+                ...(individual.data || []),
+                ...(indices.data || []),
+              ];
+              result = { type: 'stocks', data: allData, timestamp: new Date().toLocaleTimeString() };
+            } else if (individualStock && !individualStock.symbol) {
+              // Mutual fund keywords — show indices + note
+              result = await fetchNSEStocks(null, 'india');
+              result.mutualFundNote = 'Individual mutual fund tracking is coming soon. Showing index performance.';
+            } else {
+              result = await fetchNSEStocks(null, isUS ? 'us' : 'india');
+            }
           }
           break;
           
@@ -1398,17 +1555,29 @@ export default function App() {
               message: `Hey! 👋 I'm un-app — I learn what you need and when.\n\nTry typing:\n📈 "stocks" or "market"\n🍕 "food" or "hungry"\n🚕 "cab" or "uber"\n🏏 "cricket"\n📅 "calendar"\n\nThe more you use me, the better I get at showing you the right thing at the right time.`,
             };
           } else if (queryType === 'weather') {
-            result = {
-              type: 'general',
-              message: `🌤️ Weather is coming in the next update! For now, try stocks, food, cab or cricket.`,
-            };
-            captureIntent(query.trim());
+            // v0.4: Actual weather fetch
+            const location = userLocation || { lat: 19.076, lng: 72.8777 };
+            // Extract city name from query if present
+            const cityMatch = query.toLowerCase().replace(/weather|rain|temperature|climate|in|how|is|the|like/g, '').trim();
+            result = await fetchWeather(location.lat, location.lng, cityMatch.length > 2 ? cityMatch : null);
+            await updatePatterns('weather');
           } else if (queryType === 'media') {
+            // v0.4: Detect which media app user wants and open it
+            const lowQ = query.toLowerCase();
+            let targetApp = null;
+            if (lowQ.includes('spotify') || lowQ.includes('music') || lowQ.includes('song')) targetApp = 'spotify';
+            else if (lowQ.includes('netflix')) targetApp = 'netflix';
+            else if (lowQ.includes('prime')) targetApp = 'prime';
+            else if (lowQ.includes('hotstar')) targetApp = 'hotstar';
+            else if (lowQ.includes('jio')) targetApp = 'jiocinema';
+            else targetApp = 'youtube'; // default
+            
             result = {
-              type: 'general',
-              message: `🎬 YouTube and media are coming in the next update! For now, try stocks, food, cab or cricket.`,
+              type: 'media',
+              apps: targetApp ? [MEDIA_APPS[targetApp]] : Object.values(MEDIA_APPS).slice(0, 4),
+              targetApp,
+              message: targetApp ? `Open ${MEDIA_APPS[targetApp].name}` : 'Choose where to watch',
             };
-            captureIntent(query.trim());
           } else {
             result = {
               type: 'general',
@@ -1421,7 +1590,7 @@ export default function App() {
       setResponse(result);
       
       // Bug fix 1: Remove contextual cards for this category and prevent regeneration
-      if (result?.type && ['stocks', 'food', 'food_compare', 'cab', 'cab_compare', 'calendar', 'eventkit_calendar', 'cricket'].includes(result.type)) {
+      if (result?.type && ['stocks', 'food', 'food_compare', 'cab', 'cab_compare', 'calendar', 'eventkit_calendar', 'cricket', 'weather', 'media'].includes(result.type)) {
         const dismissType = result.type === 'eventkit_calendar' ? 'calendar' 
           : result.type === 'cab_compare' ? 'cab'
           : result.type === 'food_compare' ? 'food'
@@ -1431,12 +1600,12 @@ export default function App() {
       }
       
       // Bug fix 2: Only track patterns for valid categories
-      if (['stocks', 'food', 'cab', 'calendar', 'cricket'].includes(queryType)) {
+      if (['stocks', 'food', 'cab', 'calendar', 'cricket', 'weather', 'media'].includes(queryType)) {
         await updatePatterns(queryType);
       }
       
       // Feature 3: Track prediction accuracy (only for typed queries, not card taps)
-      if (currentPredictionRef.current && ['stocks', 'food', 'cab', 'calendar', 'cricket'].includes(queryType)) {
+      if (currentPredictionRef.current && ['stocks', 'food', 'cab', 'calendar', 'cricket', 'weather', 'media'].includes(queryType)) {
         await trackPredictionResult(currentPredictionRef.current, queryType);
       }
       
@@ -1965,6 +2134,10 @@ export default function App() {
             
             {response.error && (
               <Text style={styles.errorText}>{response.error}</Text>
+            )}
+            
+            {response.mutualFundNote && (
+              <Text style={{ fontSize: 12, color: THEME.lime, marginTop: 8, fontStyle: 'italic' }}>{response.mutualFundNote}</Text>
             )}
           </View>
         );
@@ -2550,6 +2723,74 @@ export default function App() {
         );
       }
         
+      // ============================================
+      // v0.4: WEATHER CARD
+      // ============================================
+      case 'weather':
+        if (response.error) {
+          return (
+            <View style={styles.generalResponseCard}>
+              <Text style={styles.generalResponseEmoji}>🌤️</Text>
+              <Text style={styles.generalResponseText}>{response.error}</Text>
+            </View>
+          );
+        }
+        return (
+          <View style={styles.responseCard}>
+            <Text style={styles.responseTitle}>🌤️ {response.city}</Text>
+            <Text style={styles.responseTime}>{response.timestamp}</Text>
+            
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <View>
+                <Text style={{ fontSize: 36, fontWeight: '700', color: THEME.white }}>{response.temp}°C</Text>
+                <Text style={{ fontSize: 14, color: THEME.lightGray }}>Feels like {response.feelsLike}°C</Text>
+              </View>
+              <View style={{ alignItems: 'flex-end' }}>
+                <Text style={{ fontSize: 14, color: THEME.white }}>{response.description}</Text>
+                <Text style={{ fontSize: 12, color: THEME.lightGray }}>💧 {response.humidity}% • 💨 {response.windSpeed} km/h</Text>
+              </View>
+            </View>
+            
+            {response.forecast && response.forecast.length > 0 && (
+              <View style={{ borderTopWidth: 1, borderTopColor: THEME.mediumGray, paddingTop: 10 }}>
+                <Text style={{ fontSize: 12, color: THEME.lime, fontWeight: '600', marginBottom: 6 }}>Next 3 days</Text>
+                {response.forecast.map((day, i) => (
+                  <View key={i} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 4 }}>
+                    <Text style={{ fontSize: 13, color: THEME.lightGray }}>{new Date(day.date).toLocaleDateString('en-IN', { weekday: 'short' })}</Text>
+                    <Text style={{ fontSize: 13, color: THEME.white }}>{day.description}</Text>
+                    <Text style={{ fontSize: 13, color: THEME.white }}>{day.minTemp}° — {day.maxTemp}°</Text>
+                  </View>
+                ))}
+              </View>
+            )}
+          </View>
+        );
+
+      // ============================================
+      // v0.4: MEDIA CARD (YouTube, Spotify, etc.)
+      // ============================================
+      case 'media':
+        return (
+          <View style={styles.responseCard}>
+            <Text style={styles.responseTitle}>🎬 Media</Text>
+            <Text style={{ fontSize: 14, color: THEME.white, marginBottom: 12 }}>{response.message}</Text>
+            <View style={styles.connectButtons}>
+              {(response.apps || []).map((app, i) => (
+                <TouchableOpacity
+                  key={i}
+                  style={styles.connectButton}
+                  onPress={() => {
+                    trackEvent('media_app_tap', { app: app.name });
+                    openWithFallback(app.scheme, app.web);
+                  }}
+                >
+                  <Text style={styles.connectButtonText}>{app.emoji} Open {app.name}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        );
+        
       default:
         return (
           <View style={styles.generalResponseCard}>
@@ -2765,13 +3006,15 @@ export default function App() {
       if (p.count < 2) continue;
       
       // Only show valid categories
-      if (!['stocks', 'food', 'cab', 'calendar', 'cricket'].includes(key)) continue;
+      if (!['stocks', 'food', 'cab', 'calendar', 'cricket', 'weather', 'media'].includes(key)) continue;
       
       const emoji = key === 'stocks' ? '📈' : 
                    key === 'food' ? '🍕' : 
                    key === 'calendar' ? '📅' : 
                    key === 'cricket' ? '🏏' : 
-                   key === 'cab' ? '🚕' : '⚡';
+                   key === 'cab' ? '🚕' : 
+                   key === 'weather' ? '🌤️' :
+                   key === 'media' ? '🎬' : '⚡';
       
       // Find most common hour
       const hourCounts = {};
@@ -2809,6 +3052,10 @@ export default function App() {
         insight = `You book ${commuteTime} rides around ${hourStr}`;
       } else if (key === 'cricket') {
         insight = `You check cricket around ${hourStr}`;
+      } else if (key === 'weather') {
+        insight = `You check weather around ${hourStr}`;
+      } else if (key === 'media') {
+        insight = `You open media around ${hourStr}`;
       } else {
         insight = `You check ${key} around ${hourStr}`;
       }
