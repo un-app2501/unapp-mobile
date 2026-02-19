@@ -2,7 +2,7 @@
   "expo": {
     "name": "un-app",
     "slug": "unapp",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -22,7 +22,13 @@
         }
       ],
       "expo-calendar",
-      "expo-secure-store"
+      "expo-secure-store",
+      [
+        "expo-updates",
+        {
+          "username": "swapnil_un-app"
+        }
+      ]
     ],
     "ios": {
       "supportsTablet": false,
@@ -55,6 +61,12 @@
       "eas": {
         "projectId": "23f6341c-8e6d-4fe3-b61b-9f753d508143"
       }
+    },
+    "updates": {
+      "url": "https://u.expo.dev/23f6341c-8e6d-4fe3-b61b-9f753d508143"
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
     },
     "owner": "swapnil_un-app"
   }

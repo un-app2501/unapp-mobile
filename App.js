@@ -15,6 +15,7 @@ import {
   Modal,
   Linking,
   Alert,
+  AppState,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { captureIntent } from './captureIntent';
@@ -24,6 +25,14 @@ import { StatusBar } from 'expo-status-bar';
 import { WebView } from 'react-native-webview';
 import * as Calendar from 'expo-calendar';
 import * as Location from 'expo-location';
+
+// OTA Updates (v0.4)
+let Updates = null;
+try {
+  Updates = require('expo-updates');
+} catch (e) {
+  console.log('[un-app] Updates module not available (dev mode)');
+}
 
 // Native modules (only available in EAS builds, not Expo Go)
 
@@ -330,9 +339,38 @@ const fetchNSEStocks = async (symbol = null, market = 'india') => {
     const results = [];
     
     for (const sym of symbols) {
-      const response = await fetch(
-        `https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1d&range=1d`
-      );
+      // Bug fix 4+7: Add timeout and retry for reliability
+      const fetchWithTimeout = async (url, timeoutMs = 8000) => {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          const res = await fetch(url, { signal: controller.signal });
+          clearTimeout(timer);
+          return res;
+        } catch (e) {
+          clearTimeout(timer);
+          throw e;
+        }
+      };
+      
+      let response;
+      try {
+        response = await fetchWithTimeout(
+          `https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1d&range=1d`
+        );
+      } catch (firstTryErr) {
+        // Retry once after 1 second
+        await new Promise(r => setTimeout(r, 1000));
+        try {
+          response = await fetchWithTimeout(
+            `https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1d&range=1d`
+          );
+        } catch (retryErr) {
+          console.log(`Stock fetch failed for ${sym} after retry:`, retryErr.message);
+          continue; // Skip this symbol, try next
+        }
+      }
+      
       const data = await response.json();
       
       if (data.chart && data.chart.result && data.chart.result[0]) {
@@ -508,6 +546,30 @@ export default function App() {
   
   const scrollViewRef = useRef(null);
   const pulseAnim = useRef(new Animated.Value(1)).current;
+  const appStateRef = useRef(AppState.currentState);
+  
+  // Bug fix 2: Refresh state when app comes to foreground
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextAppState) => {
+      if (appStateRef.current.match(/inactive|background/) && nextAppState === 'active') {
+        // App came to foreground — refresh everything
+        setDismissedCategories(new Set()); // Reset dismissed cards
+        if (dataConsentGiven) {
+          generateContextCards();
+          fetchUserLocation(); // Refresh location
+        }
+      }
+      appStateRef.current = nextAppState;
+    });
+    return () => subscription?.remove();
+  }, [dataConsentGiven, patterns, connectedServices]);
+
+  // Bug fix 1: Clear response to go "back" to home
+  const clearResponse = () => {
+    setResponse(null);
+    setDismissedCategories(new Set());
+    if (dataConsentGiven) generateContextCards();
+  };
   
   // Pulse animation for greeting
   useEffect(() => {
@@ -539,6 +601,18 @@ export default function App() {
 
   const initializeApp = async () => {
     await loadStoredData();
+    // v0.4: Check for OTA updates silently
+    try {
+      if (Updates && !__DEV__) {
+        const update = await Updates.checkForUpdateAsync();
+        if (update.isAvailable) {
+          await Updates.fetchUpdateAsync();
+          await Updates.reloadAsync();
+        }
+      }
+    } catch (e) {
+      console.log('[un-app] OTA check skipped:', e.message);
+    }
   };
 
   // Fetch device GPS location
@@ -1010,7 +1084,7 @@ export default function App() {
     if (!lastStockCheck || !currentData || !currentData.data) return null;
     
     const hoursSince = (Date.now() - lastStockCheck.timestamp) / (1000 * 60 * 60);
-    if (hoursSince < 0.5) return null; // Don't show if checked less than 30 min ago
+    if (hoursSince < 0.1) return null; // Don't show if checked less than 6 min ago
     
     const deltas = [];
     currentData.data.forEach(stock => {
@@ -1134,21 +1208,29 @@ export default function App() {
   const detectQueryType = (text) => {
     const lowered = text.toLowerCase().trim();
     
+    // UX 12: Friendly onboarding for greetings and help queries
+    if (/^(hi|hello|hey|what'?s up|how to use|help|what can you do|capabilities)$/i.test(lowered)) {
+      return 'onboarding';
+    }
+    
     // Stocks
     if (lowered.includes('stock') || lowered.includes('sensex') || 
         lowered.includes('nifty') || lowered.includes('market') ||
         lowered.includes('share') || lowered.includes('nasdaq') ||
         lowered.includes('dow') || lowered.includes('s&p') ||
-        lowered.includes('us market')) {
+        lowered.includes('us market') || lowered.includes('reliance') ||
+        lowered.includes('hdfc') || lowered.includes('mutual fund') ||
+        lowered.includes('groww') || lowered.includes('zerodha')) {
       return 'stocks';
     }
     
-    // Food
+    // Food — UX 11: "zomato" maps to food, not general
     if (lowered.includes('food') || lowered.includes('hungry') ||
         lowered.includes('eat') || lowered.includes('swiggy') ||
         lowered.includes('zomato') || lowered.includes('order') ||
         lowered.includes('biryani') || lowered.includes('pizza') ||
-        lowered.includes('dinner') || lowered.includes('lunch')) {
+        lowered.includes('dinner') || lowered.includes('lunch') ||
+        lowered.includes('restaurant') || lowered.includes('deliver')) {
       return 'food';
     }
     
@@ -1174,6 +1256,20 @@ export default function App() {
         lowered.includes('commute') || lowered.includes('office') ||
         lowered.includes('home') || lowered.includes('drop')) {
       return 'cab';
+    }
+    
+    // Weather (new category — v0.4)
+    if (lowered.includes('weather') || lowered.includes('rain') ||
+        lowered.includes('temperature') || lowered.includes('climate')) {
+      return 'weather';
+    }
+    
+    // YouTube/Media (new category — v0.4)
+    if (lowered.includes('youtube') || lowered.includes('song') ||
+        lowered.includes('music') || lowered.includes('video') ||
+        lowered.includes('spotify') || lowered.includes('netflix') ||
+        lowered.includes('watch')) {
+      return 'media';
     }
     
     return 'general';
@@ -1295,11 +1391,31 @@ export default function App() {
           break;
           
         default:
-          result = {
-            type: 'general',
-            message: `un-app is built around your daily patterns. Try asking about:\n\n📈 Stocks — "How's the market?"\n🍕 Food — "I'm hungry"\n📅 Calendar — "What's my schedule?"\n🏏 Cricket — "Live scores"\n🚕 Cab — "Book a ride"\n\nThe more you use it, the smarter it gets.`,
-          };
-          captureIntent(query.trim());
+          // Handle new query types with friendly responses
+          if (queryType === 'onboarding') {
+            result = {
+              type: 'general',
+              message: `Hey! 👋 I'm un-app — I learn what you need and when.\n\nTry typing:\n📈 "stocks" or "market"\n🍕 "food" or "hungry"\n🚕 "cab" or "uber"\n🏏 "cricket"\n📅 "calendar"\n\nThe more you use me, the better I get at showing you the right thing at the right time.`,
+            };
+          } else if (queryType === 'weather') {
+            result = {
+              type: 'general',
+              message: `🌤️ Weather is coming in the next update! For now, try stocks, food, cab or cricket.`,
+            };
+            captureIntent(query.trim());
+          } else if (queryType === 'media') {
+            result = {
+              type: 'general',
+              message: `🎬 YouTube and media are coming in the next update! For now, try stocks, food, cab or cricket.`,
+            };
+            captureIntent(query.trim());
+          } else {
+            result = {
+              type: 'general',
+              message: `I don't handle that yet, but I'm learning.\n\nTry:\n📈 "stocks" — market data\n🍕 "food" — restaurants nearby\n🚕 "cab" — book a ride\n🏏 "cricket" — live scores\n📅 "calendar" — your schedule`,
+            };
+            captureIntent(query.trim());
+          }
       }
       
       setResponse(result);
@@ -1551,6 +1667,51 @@ export default function App() {
   // OAUTH HANDLING
   // ============================================
   const initiateOAuth = async (service) => {
+    // Bug fix 3: For cab and food services, just mark as connected and open externally
+    // No actual OAuth needed — these are deeplink-only integrations
+    const deepLinkServices = {
+      uber: 'uber://',
+      ola: 'olacabs://',
+      rapido: 'rapido://',
+      nammaYatri: 'nammayatri://',
+      swiggy: 'swiggy://',
+      zomato: 'zomato://',
+    };
+    
+    if (deepLinkServices[service]) {
+      // Mark as connected
+      const newConnected = { ...connectedServices, [service]: true };
+      setConnectedServices(newConnected);
+      await AsyncStorage.setItem(STORAGE_KEYS.connectedServices, JSON.stringify(newConnected));
+      await AsyncStorage.setItem(STORAGE_KEYS[`${service}Token`], 'session_active');
+      trackEvent('service_connected', { service });
+      
+      // Try opening the native app
+      try {
+        const canOpen = await Linking.canOpenURL(deepLinkServices[service]);
+        if (canOpen) {
+          await Linking.openURL(deepLinkServices[service]);
+        } else {
+          // App not installed — open web fallback
+          const webFallbacks = {
+            uber: 'https://m.uber.com',
+            ola: 'https://www.olacabs.com',
+            rapido: 'https://www.rapido.bike',
+            nammaYatri: 'https://nammayatri.in',
+            swiggy: 'https://www.swiggy.com',
+            zomato: 'https://www.zomato.com',
+          };
+          if (webFallbacks[service]) await Linking.openURL(webFallbacks[service]);
+        }
+      } catch (e) {
+        console.log(`Could not open ${service}:`, e);
+      }
+      
+      setResponse(null);
+      return;
+    }
+    
+    // Calendar still uses in-app flow
     setCurrentOAuthService(service);
     
     let authUrl;
@@ -2435,30 +2596,10 @@ export default function App() {
   };
   const getGreeting = () => {
     const hour = new Date().getHours();
-    const stockPattern = patterns.stocks?.count > 2;
-    const foodPattern = patterns.food?.count > 2;
-    
-    if (hour >= 5 && hour < 9) {
-      return stockPattern ? 'Market opens soon' : 'Good morning';
-    } else if (hour >= 9 && hour < 12) {
-      const d = new Date().getDay();
-      const isWeekday = d >= 1 && d <= 5;
-      return (stockPattern && isWeekday) ? 'Market is open' : 'Good morning';
-    } else if (hour >= 12 && hour < 14) {
-      return foodPattern ? 'Lunch time?' : 'Good afternoon';
-    } else if (hour >= 14 && hour < 16) {
-      const d = new Date().getDay();
-      const m = new Date().getMinutes();
-      const isWeekday = d >= 1 && d <= 5;
-      const beforeClose = (hour * 60 + m) <= 930;
-      return (stockPattern && isWeekday && beforeClose) ? 'Market is open' : 'Good afternoon';
-    } else if (hour >= 16 && hour < 17) {
-      return 'Good afternoon';
-    } else if (hour >= 17 && hour < 21) {
-      return foodPattern ? 'Dinner time?' : 'Good evening';
-    } else {
-      return 'YOUR AI';
-    }
+    if (hour >= 5 && hour < 12) return 'Good morning';
+    if (hour >= 12 && hour < 17) return 'Good afternoon';
+    if (hour >= 17 && hour < 21) return 'Good evening';
+    return 'Good night';
   };
   const getPrediction = () => {
     const hour = new Date().getHours();
@@ -2714,9 +2855,9 @@ export default function App() {
           <View style={styles.statItem}>
             <Text style={styles.statLabel}>Accuracy</Text>
             <Text style={styles.statValue}>
-              {predictionAccuracy.total > 0 
+              {predictionAccuracy.total >= 5 
                 ? `${Math.round((predictionAccuracy.correct / predictionAccuracy.total) * 100)}%` 
-                : '—'}
+                : 'learning...'}
             </Text>
           </View>
           <View style={styles.statItem}>
@@ -2765,11 +2906,19 @@ export default function App() {
       >
         {/* Header */}
         <View style={styles.header}>
-          <Image
-            source={require('./assets/Logo-01.jpg')}
-            style={styles.logoImage}
-          />
-          <Text style={styles.tagline}>YOUR AI - learns you, acts for you</Text>
+          {response ? (
+            <TouchableOpacity onPress={clearResponse} style={{ flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', paddingHorizontal: 16 }}>
+              <Text style={{ fontSize: 16, color: THEME.lime, fontWeight: '600' }}>← Back</Text>
+            </TouchableOpacity>
+          ) : (
+            <>
+              <Image
+                source={require('./assets/Logo-01.jpg')}
+                style={styles.logoImage}
+              />
+              <Text style={styles.tagline}>YOUR AI - learns you, acts for you</Text>
+            </>
+          )}
           <Animated.Text style={[styles.greeting, { opacity: pulseAnim }]}>{getGreeting()}</Animated.Text>
         </View>
 
@@ -2812,8 +2961,8 @@ export default function App() {
             </View>
           )}
           
-          {/* Pre-loaded suggestion */}
-          {preloadedData?.stocks && (() => {
+          {/* Pre-loaded suggestion — only if no stocks context card already */}
+          {preloadedData?.stocks && !contextCards.some(c => c.category === 'stocks') && (() => {
             const h = new Date().getHours();
             const m = new Date().getMinutes();
             const d = new Date().getDay();
@@ -2886,7 +3035,7 @@ export default function App() {
         <View style={styles.inputContainer}>
           <TextInput
             style={styles.input}
-            placeholder="Ask me anything..."
+            placeholder="try: cab, food, stocks, cricket"
             placeholderTextColor={THEME.lightGray}
             value={query}
             onChangeText={setQuery}
