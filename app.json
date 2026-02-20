@@ -18,7 +18,7 @@
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "un-app uses your location to show nearby restaurants and calculate cab fares."
+          "locationWhenInUsePermission": "un-app uses your location to show weather updates, nearby restaurants and cab fares."
         }
       ],
       "expo-calendar",
@@ -33,7 +33,7 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "ai.unapp.mobile",
-      "buildNumber": "9",
+      "buildNumber": "12",
       "infoPlist": {
         "NSCameraUsageDescription": "un-app does not use your camera",
         "NSCalendarsUsageDescription": "un-app learns WHEN you're busy to predict your needs better",
